@@ -44,6 +44,26 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 # Link CUDA libraries using modern CMake targets
 target_link_libraries(${PROJECT_NAME} PRIVATE CUDA::cudart)
 
+if(DEFINED BLOCK_PER_SM)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE BLOCK_PER_SM=${BLOCK_PER_SM})
+endif()
+
+if(DEFINED WARP_PER_BLOCK)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE WARP_PER_BLOCK=${WARP_PER_BLOCK})
+endif()
+
+if(DEFINED TASK_SHARE_BOUND)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE TASK_SHARE_BOUND=${TASK_SHARE_BOUND})
+endif()
+
+if(DEFINED EXPAND_R)
+    if(NOT EXPAND_R)
+        target_compile_definitions(${PROJECT_NAME} PRIVATE "-UEXPAND_R")
+    else()
+        target_compile_definitions(${PROJECT_NAME} PRIVATE EXPAND_R)
+    endif()
+endif()
+
 # Set optimization flags based on compiler
 if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native")

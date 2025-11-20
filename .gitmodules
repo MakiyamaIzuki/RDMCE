@@ -1,3 +1,6 @@
 [submodule "baselines/mce-gpu"]
 	path = baselines/mce-gpu
 	url = https://github.com/Pz1996/mce-gpu.git
+[submodule "baselines/g2-aimd"]
+	path = baselines/g2-aimd
+	url = https://github.com/Pz1996/g2-aimd.git

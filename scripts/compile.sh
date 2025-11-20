@@ -8,12 +8,83 @@ BIN_DIR="${ROOT_DIR}/bin"
 # Create bin directory if it doesn't exist
 mkdir -p "${BIN_DIR}"
 
-# Function to compile RDMCE and its variants
+# Function to compile RDMCE variant with custom CMake definitions
+compile_rdmce_variant() {
+    local variant_name="$1"
+    local cmake_defs="$2"
+    local target_dir="${ROOT_DIR}/RDMCE"
+    
+    # Check if directory exists
+    if [ ! -d "${target_dir}" ]; then
+        echo "Error: RDMCE directory not found."
+        return 1
+    fi
+    
+    local build_dir="${target_dir}/build_${variant_name}"
+    
+    echo "Compiling ${variant_name}..."
+    
+    # Create and enter build directory
+    mkdir -p "${build_dir}"
+    cd "${build_dir}" || return 1
+    
+    # Build with custom definitions
+    cmake ${cmake_defs} .. && make -j$(nproc)
+    if [ $? -ne 0 ]; then
+        echo "Error: ${variant_name} compilation failed."
+        return 1
+    fi
+    
+    # Copy executable to bin with variant name
+    if [ -f "RDMCE" ]; then
+        chmod 755 "RDMCE"
+        cp "RDMCE" "${BIN_DIR}/${variant_name}"
+        echo "${variant_name} compiled successfully."
+    else
+        echo "Error: ${variant_name} executable not found."
+        return 1
+    fi
+    
+    # Clean up
+    cd "${SCRIPT_DIR}"
+    rm -rf "${build_dir}"
+}
+
+# Function to compile all RDMCE variants
+compile_rdmce_variants() {
+    echo "Compiling all RDMCE variants..."
+    
+    # NP type variant 
+    compile_rdmce_variant "RDMCE-NP" "-UEXPAND_R"
+    
+    # W type variants
+    compile_rdmce_variant "RDMCE-W4" "-DWARP_PER_BLOCK=1 -DBLOCK_PER_SM=4"
+    compile_rdmce_variant "RDMCE-W8" "-DWARP_PER_BLOCK=2 -DBLOCK_PER_SM=4"
+    compile_rdmce_variant "RDMCE-W12" "-DWARP_PER_BLOCK=3 -DBLOCK_PER_SM=4"
+    compile_rdmce_variant "RDMCE-W16" "-DWARP_PER_BLOCK=4 -DBLOCK_PER_SM=4"
+    compile_rdmce_variant "RDMCE-W20" "-DWARP_PER_BLOCK=5 -DBLOCK_PER_SM=4"
+    compile_rdmce_variant "RDMCE-W24" "-DWARP_PER_BLOCK=6 -DBLOCK_PER_SM=4"
+    compile_rdmce_variant "RDMCE-W28" "-DWARP_PER_BLOCK=7 -DBLOCK_PER_SM=4"
+    compile_rdmce_variant "RDMCE-W32" "-DWARP_PER_BLOCK=8 -DBLOCK_PER_SM=4"
+    
+    # T type variants
+    compile_rdmce_variant "RDMCE-NB" "-DTASK_SHARE_BOUND=11"
+    compile_rdmce_variant "RDMCE-T16" "-DTASK_SHARE_BOUND=16"
+    compile_rdmce_variant "RDMCE-T24" "-DTASK_SHARE_BOUND=24"
+    compile_rdmce_variant "RDMCE-T32" "-DTASK_SHARE_BOUND=32"
+    compile_rdmce_variant "RDMCE-T48" "-DTASK_SHARE_BOUND=48"
+    compile_rdmce_variant "RDMCE-T64" "-DTASK_SHARE_BOUND=64"
+    compile_rdmce_variant "RDMCE-T96" "-DTASK_SHARE_BOUND=96"
+    
+    echo "All RDMCE variants compilation completed."
+}
+
+# Function to compile standard RDMCE
 compile_rdmce() {
     local variant="RDMCE"
     local target_dir="${ROOT_DIR}/${variant}"
     
-    # Check if directory exists (supports variants matching RDMCE*)
+    # Check if directory exists
     if [ ! -d "${target_dir}" ]; then
         echo "Error: ${variant} directory not found."
         return 1
@@ -36,7 +107,8 @@ compile_rdmce() {
     
     # Copy executable to bin
     if [ -f "${variant}" ]; then
-        cp "${variant}" "${BIN_DIR}/"
+        chmod 755 "${variant}"
+        mv "${variant}" "${BIN_DIR}/"
         echo "${variant} compiled successfully."
     else
         echo "Error: ${variant} executable not found."
@@ -91,6 +163,8 @@ compile_mce_gpu() {
 compile_g2_aimd() {
     local target="g2-aimd"
     local target_dir="${ROOT_DIR}/baselines/${target}"
+    local build_dir="${target_dir}/build"
+    local build_bin_dir="${build_dir}/bin"
     
     # Check if directory exists
     if [ ! -d "${target_dir}" ]; then
@@ -100,44 +174,47 @@ compile_g2_aimd() {
     
     echo "Compiling ${target}..."
     
-    # Compile BK application
-    cd "${target_dir}/app_BK" || return 1
-    make
+    # Create and enter build directory
+    mkdir -p "${build_dir}"
+    cd "${build_dir}" || return 1
+    
+    # Build using CMake
+    cmake .. && make -j$(nproc)
     if [ $? -ne 0 ]; then
-        echo "Error: ${target} BK application compilation failed."
+        echo "Error: ${target} compilation failed."
         return 1
     fi
     
-    # Copy executable to bin
-    if [ -f "main" ]; then
-        cp "main" "${BIN_DIR}/g2-aimd-bk"
-    else
-        echo "Error: ${target} BK executable not found."
-        return 1
-    fi
+    # Copy required executables to bin directory
+    local required_bins=('preprocess' 'kcore' 'bk')
+    local success=0
     
-    # Compile gmatch application
-    cd "${target_dir}/app_gmatch" || return 1
-    make
-    if [ $? -ne 0 ]; then
-        echo "Error: ${target} gmatch application compilation failed."
-        return 1
-    fi
+    for bin in "${required_bins[@]}"; do
+        if [ -f "${build_bin_dir}/${bin}" ]; then
+            cp "${build_bin_dir}/${bin}" "${BIN_DIR}/"
+            echo "Copied ${bin} to ${BIN_DIR}"
+            success=1
+        else
+            echo "Warning: ${bin} executable not found in build directory"
+        fi
+    done
     
-    # Copy executable to bin
-    if [ -f "main" ]; then
-        cp "main" "${BIN_DIR}/g2-aimd-gmatch"
+    if [ $success -eq 1 ]; then
         echo "${target} compiled successfully."
     else
-        echo "Error: ${target} gmatch executable not found."
+        echo "Error: None of the required executables were found."
         return 1
     fi
+    
+    # Clean up and return to script directory
+    cd "${SCRIPT_DIR}"
+    rm -rf "${build_dir}"
 }
 
 # Main function to handle arguments
 main() {
     if [ $# -eq 0 ]; then
-        echo "Usage: $0 [rdmce|mce-gpu|g2-aimd|all]"
+        echo "Usage: $0 [rdmce|rdmce-variants|mce-gpu|g2-aimd|all]"
         echo "Compiles the specified component(s)."
         return 1
     fi
@@ -150,6 +227,10 @@ main() {
                 compile_rdmce
                 [ $? -ne 0 ] && success=1
                 ;;
+            rdmce-variants)
+                compile_rdmce_variants
+                [ $? -ne 0 ] && success=1
+                ;;
             mce-gpu)
                 compile_mce_gpu
                 [ $? -ne 0 ] && success=1
@@ -160,21 +241,15 @@ main() {
                 ;;
             all)
                 compile_rdmce
+                compile_rdmce_variants
                 compile_mce_gpu
                 compile_g2_aimd
                 [ $? -ne 0 ] && success=1
                 ;;
             *)
-                # Check for RDMCE variants
-                if [[ "$1" == RDMCE* ]]; then
-                    # For future extension with specific variants
-                    echo "Compiling $1 variant..."
-                    # Implementation for specific variants can be added here
-                else
-                    echo "Error: Unknown component '$1'"
-                    echo "Usage: $0 [rdmce|mce-gpu|g2-aimd|all]"
-                    return 1
-                fi
+                echo "Error: Unknown component '$1'"
+                echo "Usage: $0 [rdmce|rdmce-variants|mce-gpu|g2-aimd|all]"
+                return 1
                 ;;
         esac
         shift
