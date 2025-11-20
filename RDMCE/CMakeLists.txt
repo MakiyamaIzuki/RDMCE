@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 # Set the project name and specify CUDA language
-project(GMCE LANGUAGES CXX CUDA)
+project(RDMCE LANGUAGES CXX CUDA)
 
 # First try to find CUDA toolkit without setting any paths
 find_package(CUDAToolkit QUIET)

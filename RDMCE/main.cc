@@ -15,7 +15,7 @@ void solveMCE(Graph &g, MceAlgorithm algo, Timer &t);
 
 int main(int argc, char *argv[])
 {
-  std::string input_file = "../data/zachary.txt";       // Default input file path
+  std::string input_file = "";       // Default input file path
   OrderType order = OrderType::DEG;                     // Default order type
   MceAlgorithm algo = MceAlgorithm::BKFixedMemPivotBit; // Default algorithm
   std::vector<int> device_ids;                                    // Default device ID
@@ -30,6 +30,8 @@ int main(int argc, char *argv[])
   if (input_file.size() >= 4 && input_file.substr(input_file.size() - 4) != ".bin"){
     sortGraph(g, order, t);
     g.StoreIntoBin(input_file);
+    std::cout << "preprocess " << input_file << " done" << std::endl;
+    exit(0);
   }
   std::cout << "vertices: " << g.GetNumVertices() << " " << "\tedges: " << g.GetNumEdges() << std::endl;
   std::cout << "max degree: " << g.GetMaxDegree() << " " << "\tdegeneracy: " << g.GetDegeneracy() << std::endl;
@@ -122,21 +124,21 @@ void parseCommandLineArgs(int argc, char *argv[], std::string &input_file, Order
             try {
                 int id = std::stoi(id_str);
                 if (id < 0) {
-                    std::cerr << "无效的设备ID: " << id << std::endl;
+                    std::cerr << "invalid device ID: " << id << std::endl;
                     exit(1);
                 }
                 device_ids.push_back(id);
             } catch (const std::invalid_argument& e) {
-                std::cerr << "设备ID格式无效: " << id_str << std::endl;
+                std::cerr << "invalid device ID: " << id_str << std::endl;
                 exit(1);
             } catch (const std::out_of_range& e) {
-                std::cerr << "设备ID超出范围: " << id_str << std::endl;
+                std::cerr << "invalid device ID: " << id_str << std::endl;
                 exit(1);
             }
         }
         
         if (device_ids.empty()) {
-            std::cerr << "-d选项必须提供至少一个设备ID" << std::endl;
+            std::cerr << "-d option must provide at least one device ID" << std::endl;
             exit(1);
         }
         break;
@@ -145,6 +147,8 @@ void parseCommandLineArgs(int argc, char *argv[], std::string &input_file, Order
       has_error = true;
     }
   }
+  if (input_file.empty())
+    has_error = true;
 
   if (has_error)
   {
