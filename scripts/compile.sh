@@ -59,13 +59,15 @@ compile_mce_gpu() {
         return 1
     fi
     
+    local build_dir="${target_dir}/build"
+
     echo "Compiling ${target}..."
     
-    # Enter target directory
-    cd "${target_dir}" || return 1
-    
-    # Build using make
-    make
+    mkdir -p "${build_dir}"
+    cd "${build_dir}" || return 1
+
+    # Build
+    cmake .. && make -j$(nproc)
     if [ $? -ne 0 ]; then
         echo "Error: ${target} compilation failed."
         return 1
@@ -73,12 +75,16 @@ compile_mce_gpu() {
     
     # Copy executable to bin
     if [ -f "parallel_mce_on_gpus" ]; then
-        cp "parallel_mce_on_gpus" "${BIN_DIR}/"
+        mv parallel_mce_on_gpus mce_gpu
+        cp "mce_gpu" "${BIN_DIR}/"
         echo "${target} compiled successfully."
     else
         echo "Error: ${target} executable not found."
         return 1
     fi
+
+    cd "${SCRIPT_DIR}"
+    rm -rf "${build_dir}"
 }
 
 # Function to compile g2-aimd
