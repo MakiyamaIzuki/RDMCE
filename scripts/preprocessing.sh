@@ -88,7 +88,7 @@ for txt_file in "${DATASET_DIR}"/*.txt; do
     # 1. Process for RDMCE
     if [ ! -f "${rdmce_output}" ]; then
         echo "  - Generating RDMCE binary file..."
-        "${BIN_DIR}/RDMCE" -i "${txt_file}"
+        "${BIN_DIR}/RDMCE" -i "${txt_file} -c"
         if [ $? -eq 0 ]; then
             # Move the generated binary file to RDMCE output directory
             if [ -f "${DATASET_DIR}/${filename}.bin" ]; then

@@ -3,25 +3,21 @@
 #include <cstring>
 #include <unistd.h>
 #include "graph.h"
-#include "mce.h"
 #include "mce_gpu.cuh"
 
-MceAlgorithm parseAlgorithm(const char *algoStr);
-void parseCommandLineArgs(int argc, char *argv[], std::string &input_file, OrderType &order, MceAlgorithm &algo, std::vector<int> &device_ids);
-void printParameters(const std::string &input_file, OrderType order, MceAlgorithm algo, std::vector<int> device_ids);
+void parseCommandLineArgs(int argc, char *argv[], std::string &input_file, OrderType &order, std::vector<int> &device_ids, bool &convert_only);
+void printParameters(const std::string &input_file, OrderType order, std::vector<int> device_ids);
 void loadGraph(Graph &g, const std::string &input_file, Timer &t);
 void sortGraph(Graph &g, OrderType order, Timer &t);
-void solveMCE(Graph &g, MceAlgorithm algo, Timer &t);
 
-int main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]){
   std::string input_file = "";       // Default input file path
   OrderType order = OrderType::DEG;                     // Default order type
-  MceAlgorithm algo = MceAlgorithm::BKFixedMemPivotBit; // Default algorithm
-  std::vector<int> device_ids;                                    // Default device ID
+  std::vector<int> device_ids;                          // Default device ID
+  bool convert_only = false;                            // Default: do not convert only
 
-  parseCommandLineArgs(argc, argv, input_file, order, algo, device_ids);
-  printParameters(input_file, order, algo, device_ids);
+  parseCommandLineArgs(argc, argv, input_file, order, device_ids, convert_only);
+  printParameters(input_file, order, device_ids);
 
   Graph g;
   Timer t;
@@ -29,14 +25,20 @@ int main(int argc, char *argv[])
   loadGraph(g, input_file, t);
   if (input_file.size() >= 4 && input_file.substr(input_file.size() - 4) != ".bin"){
     sortGraph(g, order, t);
-    g.StoreIntoBin(input_file);
-    std::cout << "preprocess " << input_file << " done" << std::endl;
-    exit(0);
+    if(convert_only) {
+      g.StoreIntoBin(input_file);
+      std::cout << "preprocess " << input_file << " done" << std::endl;
+    }
   }
+  
   std::cout << "vertices: " << g.GetNumVertices() << " " << "\tedges: " << g.GetNumEdges() << std::endl;
   std::cout << "max degree: " << g.GetMaxDegree() << " " << "\tdegeneracy: " << g.GetDegeneracy() << std::endl;
-
-  // solveMCE(g, algo, t);
+  
+  // If convert only mode is enabled, exit after conversion
+  if (convert_only) {
+    std::cout << "Convert only mode (-c) enabled, exiting after conversion." << std::endl;
+    return 0;
+  }
 
   if(device_ids.size() < 2){
     auto device_id = device_ids.empty()? 0 : device_ids[0];
@@ -50,37 +52,12 @@ int main(int argc, char *argv[])
   return 0;
 }
 
-// Function implementation to parse the algorithm string
-
-MceAlgorithm parseAlgorithm(const char *algoStr)
-{
-  char *endptr;
-  long num = std::strtol(algoStr, &endptr, 10);
-  if (*endptr == '\0')
-  {
-    if (num >= 0 && num < static_cast<long>(MceAlgorithm::MCEEND))
-    {
-      return static_cast<MceAlgorithm>(num);
-    }
-  }
-
-  for (int i = 0; i < static_cast<int>(MceAlgorithm::MCEEND); i++)
-  {
-    if (std::strcmp(algoStr, MceAlgorithmNames[i]) == 0)
-    {
-      return static_cast<MceAlgorithm>(i);
-    }
-  }
-  std::cerr << "Invalid algorithm: " << algoStr << std::endl;
-  return MceAlgorithm::MCEEND;
-}
-
 // Function implementation to parse command line arguments
-void parseCommandLineArgs(int argc, char *argv[], std::string &input_file, OrderType &order, MceAlgorithm &algo, std::vector<int> &device_ids)
+void parseCommandLineArgs(int argc, char *argv[], std::string &input_file, OrderType &order, std::vector<int> &device_ids, bool &convert_only)
 {
   int opt;
   bool has_error = false;
-  while ((opt = getopt(argc, argv, "i:o:a:d:")) != -1)
+  while ((opt = getopt(argc, argv, "i:o:d:c")) != -1)
   {
     switch (opt)
     {
@@ -109,11 +86,7 @@ void parseCommandLineArgs(int argc, char *argv[], std::string &input_file, Order
         has_error = true;
       }
       break;
-    case 'a':
-      algo = parseAlgorithm(optarg);
-      if (algo == MceAlgorithm::MCEEND)
-        has_error = true;
-      break;
+
     case 'd': {
         std::string ids_str = optarg;
         std::stringstream ss(ids_str);
@@ -143,6 +116,9 @@ void parseCommandLineArgs(int argc, char *argv[], std::string &input_file, Order
         }
         break;
     }
+    case 'c':
+      convert_only = true;
+      break;
     default:
       has_error = true;
     }
@@ -152,21 +128,16 @@ void parseCommandLineArgs(int argc, char *argv[], std::string &input_file, Order
 
   if (has_error)
   {
-    std::cerr << "\033[33m" << "Usage: " << argv[0] << " -i <input_graph_file> -o <order_option> -a <algorithm_option> -d <device_ids>" << std::endl;
+    std::cerr << "\033[33m" << "Usage: " << argv[0] << " -i <input_graph_file> -o <order_option> -d <device_ids> [-c]" << std::endl;
     std::cerr << "Order options: a (ascending), d (descending), deg (degeneracy),  unchange (unchanged)" << std::endl;
-    std::cerr << "Algorithm options: 0) " << MceAlgorithmNames[0];
-    for (int i = 1; i < static_cast<int>(MceAlgorithm::MCEEND); i++)
-    {
-      std::cerr << ", " << i << ") " << MceAlgorithmNames[i];
-    }
-    std::cerr << "." << std::endl;
-    std::cerr << "\033[36m" << "e.g., " << argv[0] << " -i ../data/zachary.txt -o deg -a 0 -d 0" << "\033[0m" << std::endl;
+    std::cerr << "\033[36m" << "e.g., " << argv[0] << " -i RDMCE/data/zachary.txt -o deg -d 0" << "\033[0m" << std::endl;
+    // std::cerr << "\033[36m" << "e.g., " << argv[0] << " -i ../data/zachary.txt -o deg -d 0 -c" << "\033[0m" << " (convert only)" << std::endl;
     exit(1);
   }
 }
 
 // Function implementation to print the parameters
-void printParameters(const std::string &input_file, OrderType order, MceAlgorithm algo, std::vector<int> device_ids)
+void printParameters(const std::string &input_file, OrderType order, std::vector<int> device_ids)
 {
   std::cout << "==================== Parameters ====================" << std::endl;
   std::cout << "Device ID: " ;
@@ -202,10 +173,7 @@ void printParameters(const std::string &input_file, OrderType order, MceAlgorith
   #endif
   std::cout << std::endl;
 
-  std::cout << "Algorithm: ";
-  std::cout << MceAlgorithmNames[static_cast<int>(algo)];
 
-  std::cout << std::endl;
   std::cout << "====================================================" << std::endl;
 }
 
@@ -229,15 +197,4 @@ void sortGraph(Graph &g, OrderType order, Timer &t)
   g.SortByOrder(order);
   t.Stop();
   std::cout << "Sort time: " << t.Elapsed() << "s" << std::endl;
-}
-
-// Function implementation to solve the maximum clique problem
-void solveMCE(Graph &g, MceAlgorithm algo, Timer &t)
-{
-  MceSolver solver(g);
-  t.Start();
-  solver.Solve(algo);
-  t.Stop();
-  std::cout << "MCE count: " << solver.mce_count_ << std::endl;
-  std::cout << "Solve time: " << t.Elapsed() << "s" << std::endl;
 }

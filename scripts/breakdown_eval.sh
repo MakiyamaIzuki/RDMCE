@@ -17,7 +17,11 @@ RDMCE_VARIANTS=(
   "RDMCE-NP"
   "RDMCE-W4"
   "RDMCE-W8"
+  "RDMCE-W12"
   "RDMCE-W16"
+  "RDMCE-W20"
+  "RDMCE-W24"
+  "RDMCE-W28"
   "RDMCE-W32"
   "RDMCE-T16"
   "RDMCE-T24"
@@ -130,11 +134,7 @@ for variant in "${RDMCE_VARIANTS[@]}"; do
 done
 
 # Run multi-GPU test
-process_multigpu_test
+# process_multigpu_test
 
 echo "[$(date)] All evaluations completed. Results in ${LOG_DIR}"
-echo "Log files created:"
-for variant in "${RDMCE_VARIANTS[@]}"; do
-    echo "- ${LOG_DIR}/${variant}.log"
-done
-echo "- ${LOG_DIR}/rdmce_multigpu.log"
+
