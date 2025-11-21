@@ -12,8 +12,8 @@ The project is organized as follows:
   - **src/kernels/**: GPU kernel implementations, including BkPivotBitBalance and Multi-GPU variants
 
 - **baselines/**: Contains implementations of comparison methods
-  - **g2-aimd/**: G²-AIMD algorithm implementation
-  - **mce-gpu/**: MCE-GPU algorithm implementation
+  - **g2-aimd/**: G²-AIMD algorithm implementation (Git submodule)
+  - **mce-gpu/**: MCE-GPU algorithm implementation (Git submodule)
 
 - **scripts/**: Utility scripts for compilation and evaluation
 
@@ -22,6 +22,17 @@ The project is organized as follows:
 - **logs/**: Contains log files with execution time results
 
 - **exp/**: Contains data and code for generating the figures presented in the paper
+
+### Git Submodule Setup
+
+This project uses Git submodules for the baseline implementations. After cloning the repository, initialize and update the submodules:
+
+```bash
+# Initialize and update all submodules
+git submodule update --init --recursive
+```
+
+This command will fetch the source code for the g2-aimd and mce-gpu baselines into the baselines directory.
 
 ## RDMCE Quick Start
 
