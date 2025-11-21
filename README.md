@@ -1,6 +1,18 @@
 # Root-Down Exposure for Maximal Clique Enumeration on GPUs
 
-This repository contains the source code for the paper "Root-Down Exposure for Maximal Clique Enumeration on GPUs" accepted to PPoPP 2026.
+This repository contains the source code for the paper "Root-Down Exposure for Maximal Clique Enumeration on GPUs" accepted to PPoPP 2026. The artifact implements **RDMCE**, which efficiently enumerates all maximal cliques in large-scale graphs using a root-down exposure mechanism, a bitmap-centric MCE scheme, and aggressive node generation.
+
+
+```bash
+# Clone the repository
+git clone https://github.com/Pz1996/RDMCE.git
+cd RDMCE
+
+# Initialize and update all submodules
+git submodule update --init --recursive
+```
+
+
 
 ## Project Structure
 
@@ -22,17 +34,6 @@ The project is organized as follows:
 - **logs/**: Contains log files with execution time results
 
 - **exp/**: Contains data and code for generating the figures presented in the paper
-
-### Git Submodule Setup
-
-This project uses Git submodules for the baseline implementations. After cloning the repository, initialize and update the submodules:
-
-```bash
-# Initialize and update all submodules
-git submodule update --init --recursive
-```
-
-This command will fetch the source code for the g2-aimd and mce-gpu baselines into the baselines directory.
 
 ## RDMCE Quick Start
 
