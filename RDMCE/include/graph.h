@@ -13,7 +13,7 @@ class Graph
 {
 protected:
   std::string name_;
-  std::vector<vlist_t> V_;
+  std::vector<std::vector<vid_t> > V_;
   std::vector<vid_t> labels_;
   size_t num_vertices_ = 0;
   size_t num_edges_ = 0;
@@ -22,7 +22,7 @@ protected:
   vid_t *rowoffset_cpu_ = nullptr;
   vid_t *colidx_cpu_ = nullptr;
 
-  inline void ApplyOrder(const vlist_t &order);
+  inline void ApplyOrder(const std::vector<vid_t>  &order);
   void SortByDegreeAsc();
   void SortByDegreeDes();
   void SortByDegeneracy();
@@ -44,7 +44,7 @@ public:
   inline size_t GetDegeneracy() const { return degeneracy_; }
   inline vid_t* GetRowOffset() { return rowoffset_cpu_; }
   inline vid_t* GetColIdx() { return colidx_cpu_; }
-  inline const vlist_t &N(vid_t v) const { return V_[v]; }
+  inline const std::vector<vid_t>  &N(vid_t v) const { return V_[v]; }
 
   void SortByOrder(OrderType order);
 
