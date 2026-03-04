@@ -652,9 +652,11 @@ __global__ void Peel(GraphGpu const g, uint32_t* survival, uint32_t* counter, ui
 #define peelingD1v_s buffer_s
     peelingD1v_s[threadIdx.x] = 0xffffffff;
     peelingD1v_s[threadIdx.x + 256] = 0xffffffff;
-    survival[TID] = degree[TID] > 0;
-    if (degree[TID] == 0) c0 += 1;
-    if (degree[TID] == 1) peelingD1v_s[threadIdx.x] = TID;
+    if (TID < g.num_vertices_) {
+        survival[TID] = degree[TID] > 0;
+        if (degree[TID] == 0) c0 += 1;
+        if (degree[TID] == 1) peelingD1v_s[threadIdx.x] = TID;
+    }
     C0 = Sum(c1);
     c0 = 0;
     counter[0] += C1;
@@ -761,22 +763,24 @@ __global__ void Peel(GraphGpu const g, uint32_t* survival, uint32_t* counter, ui
 
     using BlockScan = cub::BlockScan<uint32_t, 256>;
     __shared__ typename BlockScan::TempStorage temp_s;
-    c1 = degree[TID];
+    c1 = TID < g.num_vertices_ ? degree[TID] : 0;
     BlockScan(temp_s).ExclusiveSum(c1, c1);
-    offset_offset[TID] = c1;
-    c2 = survival[TID];
+    if (TID < g.num_vertices_) offset_offset[TID] = c1;
+    c2 = TID < g.num_vertices_ ? survival[TID] : 0;
     BlockScan(temp_s).ExclusiveSum(c2, c2);
-    new_vid[TID] = c2;
+    if (TID < g.num_vertices_) new_vid[TID] = c2;
     __syncthreads();
-    offset_offset[TID] += blockIdx.x > 0 ? offset_offset[blockIdx.x * blockDim.x - 1] : 0;
+    if (TID < g.num_vertices_)
+        offset_offset[TID] += blockIdx.x > 0 ? offset_offset[blockIdx.x * blockDim.x - 1] : 0;
 }
 
 __global__ void Rebuild(GraphGpu const orig_g, GraphGpu g, uint32_t* degree, uint32_t* survival, uint32_t* new_vid, uint32_t* offset_offset)
 {
     auto const TID = blockIdx.x * blockDim.x + threadIdx.x;
-    auto const NVID = new_vid[TID];
-    g.rowoffset_[g.num_vertices_] = degree[orig_g.num_vertices_ - 1] + offset_offset[orig_g.num_vertices_ - 1];
-    if (survival[TID]) {
+    auto const NVID = TID < orig_g.num_vertices_ ? new_vid[TID] : 0;
+    if (TID == 0)
+        g.rowoffset_[g.num_vertices_] = degree[orig_g.num_vertices_ - 1] + offset_offset[orig_g.num_vertices_ - 1];
+    if (TID < orig_g.num_vertices_ && survival[TID]) {
         auto cur = g.rowoffset_[NVID] = offset_offset[TID];
         for (auto i = orig_g.rowoffset_[TID]; i < orig_g.rowoffset_[TID + 1]; ++i) {
             auto u = orig_g.colidx_[i];
@@ -845,30 +849,30 @@ acc_t BkSolverWrapper(Graph &graph, size_t device_id)
   uint32_t counter_h[8] { 0 };
   uint32_t* new_vid;
   uint32_t* offset_offset;
-  cudaMalloc(&survival, graph_gpu.num_vertices_ * sizeof(uint32_t));
-  cudaMemset(survival, 0, graph_gpu.num_vertices_ * sizeof(uint32_t));
-  cudaMalloc(&new_vid, graph_gpu.num_vertices_ * sizeof(uint32_t));
-  cudaMalloc(&offset_offset, graph_gpu.num_vertices_ * sizeof(uint32_t));
-  cudaMalloc(&counter, 8 * sizeof(uint32_t));
-  cudaMemset(counter, 0, 8 * sizeof(uint32_t));
+  CUDA_CHECK(cudaMalloc(&survival, graph_gpu.num_vertices_ * sizeof(uint32_t)));
+  CUDA_CHECK(cudaMemset(survival, 0, graph_gpu.num_vertices_ * sizeof(uint32_t)));
+  CUDA_CHECK(cudaMalloc(&new_vid, graph_gpu.num_vertices_ * sizeof(uint32_t)));
+  CUDA_CHECK(cudaMalloc(&offset_offset, graph_gpu.num_vertices_ * sizeof(uint32_t)));
+  CUDA_CHECK(cudaMalloc(&counter, 8 * sizeof(uint32_t)));
+  CUDA_CHECK(cudaMemset(counter, 0, 8 * sizeof(uint32_t)));
 
   Peel<<<(graph_gpu.num_vertices_ + 255) >> 8, 256>>>(graph_gpu, survival, counter, graph_gpu.degree_, new_vid, offset_offset);
-  cudaMemcpy(counter_h, counter, 8 * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+  CUDA_CHECK(cudaMemcpy(counter_h, counter, 8 * sizeof(uint32_t), cudaMemcpyDeviceToHost));
   cudaFree(counter);
-  uint32_t last;
-  cudaMemcpy(&reduced_graph_gpu.num_vertices_, new_vid + graph_gpu.num_vertices_ - 1, sizeof(uint32_t), cudaMemcpyDeviceToHost);
-  cudaMemcpy(&last, survival + graph_gpu.num_vertices_ - 1, sizeof(uint32_t), cudaMemcpyDeviceToHost);
-  reduced_graph_gpu.num_vertices_ += last;
-  cudaMemcpy(&reduced_graph_gpu.num_edges_, offset_offset + graph_gpu.num_vertices_ - 1, sizeof(uint32_t), cudaMemcpyDeviceToHost);
-  cudaMemcpy(&last, graph_gpu.degree_ + graph_gpu.num_vertices_ - 1, sizeof(uint32_t), cudaMemcpyDeviceToHost);
-  reduced_graph_gpu.num_edges_ += last;
-  cudaMalloc(&reduced_graph_gpu.rowoffset_, (reduced_graph_gpu.num_vertices_ + 1) * sizeof(vid_t));
-  cudaMalloc(&reduced_graph_gpu.colidx_, (reduced_graph_gpu.num_edges_ << 1) * sizeof(vid_t));
+  uint32_t a, b;
+  CUDA_CHECK(cudaMemcpy(&a, new_vid + graph_gpu.num_vertices_ - 1, sizeof(uint32_t), cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(&b, survival + graph_gpu.num_vertices_ - 1, sizeof(uint32_t), cudaMemcpyDeviceToHost));
+  reduced_graph_gpu.num_vertices_ = static_cast<size_t>(a) + b;
+  CUDA_CHECK(cudaMemcpy(&a, offset_offset + graph_gpu.num_vertices_ - 1, sizeof(uint32_t), cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(&b, graph_gpu.degree_ + graph_gpu.num_vertices_ - 1, sizeof(uint32_t), cudaMemcpyDeviceToHost));
+  reduced_graph_gpu.num_edges_ += static_cast<size_t>(a) + b;
+  CUDA_CHECK(cudaMalloc(&reduced_graph_gpu.rowoffset_, (reduced_graph_gpu.num_vertices_ + 1) * sizeof(vid_t)));
+  CUDA_CHECK(cudaMalloc(&reduced_graph_gpu.colidx_, (reduced_graph_gpu.num_edges_ << 1) * sizeof(vid_t)));
 
   Rebuild<<<(graph_gpu.num_vertices_ + 255) >> 8, 256>>>(graph_gpu, reduced_graph_gpu, graph_gpu.degree_, survival, new_vid, offset_offset);
-  cudaFree(offset_offset);
-  cudaFree(new_vid);
-  cudaFree(survival);
+  CUDA_CHECK(cudaFree(offset_offset));
+  CUDA_CHECK(cudaFree(new_vid));
+  CUDA_CHECK(cudaFree(survival));
   graph_gpu.Free();
   graph_gpu = reduced_graph_gpu;
 
@@ -876,7 +880,7 @@ acc_t BkSolverWrapper(Graph &graph, size_t device_id)
   // BkpbKernel<<<1, 32>>>(graph_gpu, context_gpu);
 
   CUDA_CHECK(cudaDeviceSynchronize());
-  printf("[GKP] counter = %u, %u, %u\n", counter[0], counter[1], counter[2]);
+  printf("[GKP] counter = %u, %u, %u\n", counter_h[0], counter_h[1], counter_h[2]);
   auto mc_num = context_gpu.GetMcNum() + counter_h[1] + counter_h[2];
   // free memory
   graph_gpu.Free();
