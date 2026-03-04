@@ -11,7 +11,7 @@ enum class OrderType
 
 class Graph
 {
-protected:
+public:
   std::string name_;
   std::vector<std::vector<vid_t> > V_;
   std::vector<vid_t> labels_;
@@ -21,6 +21,7 @@ protected:
   size_t degeneracy_ = 0;
   vid_t *rowoffset_cpu_ = nullptr;
   vid_t *colidx_cpu_ = nullptr;
+  uint32_t *degree_cpu_ = nullptr;
 
   inline void ApplyOrder(const std::vector<vid_t>  &order);
   void SortByDegreeAsc();

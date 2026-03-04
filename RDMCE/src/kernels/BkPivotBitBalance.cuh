@@ -1,7 +1,15 @@
 #pragma once
+#include "common.cuh"
 #include "context_gpu.cuh"
 #include "graph_gpu.cuh"
 #include "mce_gpu.cuh"
+#include <cub/thread/thread_operators.cuh>
+#include <thrust/reduce.h>
+#include <thrust/device_vector.h>
+#include <thrust/host_vector.h>
+#include <cstdint>
+#include <cuda.h>
+#include <concepts>
 
 #ifndef TASK_SHARE_BOUND
   #define TASK_SHARE_BOUND 24
@@ -607,6 +615,178 @@ __launch_bounds__(32 * WARP_PER_BLOCK, 1)
   //   printf("total shared tasks size: %d\n", *context.debug_val);
 }
 
+template <typename Addable>
+    requires (std::integral<Addable> || std::floating_point<Addable>) && (sizeof(Addable) >= 4)
+__forceinline__ __device__ Addable Sum(Addable a)
+{
+    a += __shfl_xor_sync(0xffffffff, a, 1);
+    a += __shfl_xor_sync(0xffffffff, a, 2);
+    a += __shfl_xor_sync(0xffffffff, a, 4);
+    a += __shfl_xor_sync(0xffffffff, a, 8);
+    a += __shfl_xor_sync(0xffffffff, a, 16);
+    __shared__ Addable t[32];
+    int const wid = threadIdx.x >> 5;
+    if ((threadIdx.x & 0x1f) == 0) t[wid] = a;
+    __syncthreads();
+    if (wid == 0) {
+        a = threadIdx.x < (blockDim.x >> 5) ? t[threadIdx.x] : static_cast<Addable>(0);
+        int m = __activemask();
+        a += __shfl_xor_sync(m, a, 1);
+        a += __shfl_xor_sync(m, a, 2);
+        a += __shfl_xor_sync(m, a, 4);
+        a += __shfl_xor_sync(m, a, 8);
+        a += __shfl_xor_sync(m, a, 16);
+        if (threadIdx.x == 0) t[0] = a;
+    }
+    __syncthreads();
+    return t[0];
+}
+
+__global__ void Peel(GraphGpu const g, uint32_t* survival, uint32_t* counter, uint32_t* degree, uint32_t* new_vid, uint32_t* offset_offset)
+{
+    auto const TID = blockDim.x * blockIdx.x + threadIdx.x;
+
+    __shared__ uint32_t buffer_s[512];
+    // Global identities for threads.
+    uint32_t c0 = 0, c1 = 0, c2 = 0, C0 = 0, C1 = 0, C2 = 0;
+#define peelingD1v_s buffer_s
+    peelingD1v_s[threadIdx.x] = 0xffffffff;
+    peelingD1v_s[threadIdx.x + 256] = 0xffffffff;
+    survival[TID] = degree[TID] > 0;
+    if (degree[TID] == 0) c0 += 1;
+    if (degree[TID] == 1) peelingD1v_s[threadIdx.x] = TID;
+    C0 = Sum(c1);
+    c0 = 0;
+    counter[0] += C1;
+    __syncthreads();
+
+    while (true) {
+        while (true) {
+            auto v = peelingD1v_s[threadIdx.x];
+            peelingD1v_s[threadIdx.x] = 0xffffffff;
+            if (v < 0xffffffff && survival[v]) {
+                survival[v] = false;
+                if (degree[v] == 0) {
+                    C0 += 1;
+                }
+                if (degree[v] == 1) { // Do nothing upon peeling d-0 vertices
+                    c1 += 1;
+                    degree[v] = 0;
+                    for (auto j = g.rowoffset_[v]; j < g.rowoffset_[v + 1]; ++j) {
+                        auto u = g.colidx_[j];
+                        if (survival[u]) {
+                            if (atomicSub(degree + u, 1) == 2) peelingD1v_s[threadIdx.x] = u;
+                        }
+                    }
+                }
+            }
+            v = peelingD1v_s[threadIdx.x + 256];
+            peelingD1v_s[threadIdx.x + 256] = 0xffffffff;
+            if (v < 0xffffffff && survival[v]) {
+                survival[v] = false;
+                if (degree[v] == 0) {
+                    C0 += 1;
+                }
+                if (degree[v] == 1) { // Do nothing upon peeling d-0 vertices
+                    c1 += 1;
+                    degree[v] = 0;
+                    for (auto j = g.rowoffset_[v]; j < g.rowoffset_[v + 1]; ++j) {
+                        auto u = g.colidx_[j];
+                        if (survival[u]) {
+                            if (atomicSub(degree + u, 1) == 2) peelingD1v_s[threadIdx.x + 256] = u;
+                        }
+                    }
+                }
+            }
+            C0 = Sum(c0);
+            c0 = 0;
+            C1 = Sum(c1);
+            c1 = 0;
+            if (C1 == 0) break;
+            if (TID == 0) {
+                counter[0] += C0;
+                counter[1] += C1;
+            }
+        }
+        while (C1 != 0 || C2 != 0) {
+            C1 = C2 = 0;
+            for (auto i = TID; i < g.num_vertices_; i += gridDim.x) {
+                if (survival[i] && degree[i] == 2) {
+                    c1 = c2 = i;
+                    for (auto j = g.rowoffset_[i]; j < g.rowoffset_[i + 1]; ++j) {
+                        if (survival[g.colidx_[j]]) {
+                            c1 = c2;
+                            c2 = g.colidx_[j];
+                        }
+                    }
+                    // When c1 equals to i, there are actually fewer ngbh of v_i than 2.
+                    // (Another thread has peeled ngbh(v_i).)
+                    if (c1 == i || degree[c1] == 2 && c1 < i || degree[c2] == 2 && c2 < i) {
+                        // In order to avoid duplication,
+                        // Manipulate the least-indexed vertices only.
+                        c1 = c2 = 0;
+                    }
+                    else {
+                        bool triangle = false;
+                        for (auto j = g.rowoffset_[c1]; j < g.rowoffset_[c1 + 1]; ++j) {
+                            if (c2 == g.colidx_[j]) triangle = true;
+                        }
+                        // Isolated triangles are found,
+                        // thus there are no surviving vertices affected hereby by peeling.
+                        if (triangle && degree[c1] == 2 && degree[c2] == 2) {
+                            survival[c1] = survival[c2] = false;
+                            degree[c1] = degree[c2] = 0;
+                        }
+                        else {
+                            if (atomicSub(degree + c1, 1) < 3) peelingD1v_s[threadIdx.x] = c1;
+                            if (atomicSub(degree + c2, 1) < 3) peelingD1v_s[threadIdx.x + 256] = c2;
+                        }
+                        survival[i] = false;
+                        degree[i] = 0;
+                        c1 = triangle ? 0 : 2;
+                        c2 = triangle ? 1 : 0;
+                    }
+                }
+                C1 += Sum(c1);
+                C2 += Sum(c2);
+            }
+            if (TID == 0) {
+                counter[1] += C1;
+                counter[2] += C2;
+            }
+        }
+        if (C1 == 0 && C2 == 0) break;
+#undef peelingD1v_s
+    }
+
+    using BlockScan = cub::BlockScan<uint32_t, 256>;
+    __shared__ typename BlockScan::TempStorage temp_s;
+    c1 = degree[TID];
+    BlockScan(temp_s).ExclusiveSum(c1, c1);
+    offset_offset[TID] = c1;
+    c2 = survival[TID];
+    BlockScan(temp_s).ExclusiveSum(c2, c2);
+    new_vid[TID] = c2;
+    __syncthreads();
+    offset_offset[TID] += blockIdx.x > 0 ? offset_offset[blockIdx.x * blockDim.x - 1] : 0;
+}
+
+__global__ void Rebuild(GraphGpu const orig_g, GraphGpu g, uint32_t* degree, uint32_t* survival, uint32_t* new_vid, uint32_t* offset_offset)
+{
+    auto const TID = blockIdx.x * blockDim.x + threadIdx.x;
+    auto const NVID = new_vid[TID];
+    g.rowoffset_[g.num_vertices_] = degree[orig_g.num_vertices_ - 1] + offset_offset[orig_g.num_vertices_ - 1];
+    if (survival[TID]) {
+        auto cur = g.rowoffset_[NVID] = offset_offset[TID];
+        for (auto i = orig_g.rowoffset_[TID]; i < orig_g.rowoffset_[TID + 1]; ++i) {
+            auto u = orig_g.colidx_[i];
+            if (survival[u]) {
+                g.colidx_[cur++] = new_vid[u];
+            }
+        }
+    }
+}
+
 // 5. User defined solver wrapper
 acc_t BkSolverWrapper(Graph &graph, size_t device_id)
 {
@@ -658,11 +838,46 @@ acc_t BkSolverWrapper(Graph &graph, size_t device_id)
   // CUDA_CHECK(cudaMalloc((void **)&context_gpu.debug_val, sizeof(vid_t)));
   // CUDA_CHECK(cudaMemset(context_gpu.debug_val, 0, sizeof(vid_t))); 
 
+  GraphGpu reduced_graph_gpu = graph_gpu;
+  reduced_graph_gpu.degree_ = nullptr;
+  uint32_t* survival;
+  uint32_t* counter;
+  uint32_t counter_h[8] { 0 };
+  uint32_t* new_vid;
+  uint32_t* offset_offset;
+  cudaMalloc(&survival, graph_gpu.num_vertices_ * sizeof(uint32_t));
+  cudaMemset(survival, 0, graph_gpu.num_vertices_ * sizeof(uint32_t));
+  cudaMalloc(&new_vid, graph_gpu.num_vertices_ * sizeof(uint32_t));
+  cudaMalloc(&offset_offset, graph_gpu.num_vertices_ * sizeof(uint32_t));
+  cudaMalloc(&counter, 8 * sizeof(uint32_t));
+  cudaMemset(counter, 0, 8 * sizeof(uint32_t));
+
+  Peel<<<(graph_gpu.num_vertices_ + 255) >> 8, 256>>>(graph_gpu, survival, counter, graph_gpu.degree_, new_vid, offset_offset);
+  cudaMemcpy(counter_h, counter, 8 * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+  cudaFree(counter);
+  uint32_t last;
+  cudaMemcpy(&reduced_graph_gpu.num_vertices_, new_vid + graph_gpu.num_vertices_ - 1, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+  cudaMemcpy(&last, survival + graph_gpu.num_vertices_ - 1, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+  reduced_graph_gpu.num_vertices_ += last;
+  cudaMemcpy(&reduced_graph_gpu.num_edges_, offset_offset + graph_gpu.num_vertices_ - 1, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+  cudaMemcpy(&last, graph_gpu.degree_ + graph_gpu.num_vertices_ - 1, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+  reduced_graph_gpu.num_edges_ += last;
+  cudaMalloc(&reduced_graph_gpu.rowoffset_, (reduced_graph_gpu.num_vertices_ + 1) * sizeof(vid_t));
+  cudaMalloc(&reduced_graph_gpu.colidx_, (reduced_graph_gpu.num_edges_ << 1) * sizeof(vid_t));
+
+  Rebuild<<<(graph_gpu.num_vertices_ + 255) >> 8, 256>>>(graph_gpu, reduced_graph_gpu, graph_gpu.degree_, survival, new_vid, offset_offset);
+  cudaFree(offset_offset);
+  cudaFree(new_vid);
+  cudaFree(survival);
+  graph_gpu.Free();
+  graph_gpu = reduced_graph_gpu;
+
   BkpbKernel<<<sm_num * BLOCK_PER_SM, 32 * WARP_PER_BLOCK>>>(graph_gpu, context_gpu);
   // BkpbKernel<<<1, 32>>>(graph_gpu, context_gpu);
 
   CUDA_CHECK(cudaDeviceSynchronize());
-  auto mc_num = context_gpu.GetMcNum();
+  printf("[GKP] counter = %u, %u, %u\n", counter[0], counter[1], counter[2]);
+  auto mc_num = context_gpu.GetMcNum() + counter_h[1] + counter_h[2];
   // free memory
   graph_gpu.Free();
   // context_gpu.bitmaps_.Free();

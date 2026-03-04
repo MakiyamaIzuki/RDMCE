@@ -4,9 +4,10 @@
 
 class GraphGpu
 {
-protected:
+public:
   vid_t *rowoffset_;
   vid_t *colidx_;
+  uint32_t *degree_;
   // vid_t *rowidx_; // only used for COO format
   size_t num_vertices_;
   size_t num_edges_;

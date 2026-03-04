@@ -1,4 +1,5 @@
 #include "graph_gpu.cuh"
+#include <cstdint>
 
 __host__ void GraphGpu::LoadFromCpu(Graph &graph, bool print)
 {
@@ -6,17 +7,20 @@ __host__ void GraphGpu::LoadFromCpu(Graph &graph, bool print)
   assert(rowoffset_ == nullptr && colidx_ == nullptr);
   vid_t *rowoffset_cpu;
   vid_t *colidx_cpu;
+  uint32_t *degree_cpu;
 
 
   if(graph.GetRowOffset() == nullptr || graph.GetColIdx() == nullptr){
     rowoffset_cpu = new vid_t[graph.GetNumVertices() + 1];
     colidx_cpu = new vid_t[graph.GetNumEdges() * 2];
+    degree_cpu = new uint32_t[graph.GetNumVertices()];
     // vid_t *rowidx_cpu = new vid_t[graph.GetNumEdges() * 2];
     vid_t edge_cpu = 0;
 
     for (vid_t i = 0; i < graph.GetNumVertices(); i++)
     {
       rowoffset_cpu[i] = edge_cpu;
+      degree_cpu[i] = graph.N(i).size();
       for (vid_t j = 0; j < graph.N(i).size(); j++)
       {
         // rowidx_cpu[edge_cpu] = i;
@@ -29,6 +33,7 @@ __host__ void GraphGpu::LoadFromCpu(Graph &graph, bool print)
   } else {
     rowoffset_cpu = graph.GetRowOffset();
     colidx_cpu = graph.GetColIdx();
+    degree_cpu = graph.degree_cpu_;
   }
   
   // In CSR format, the number of elements in colidx and rowidx should be twice the number of edges
@@ -37,9 +42,11 @@ __host__ void GraphGpu::LoadFromCpu(Graph &graph, bool print)
 
   CUDA_CHECK(cudaMalloc(&rowoffset_, sizeof(vid_t) * (graph.GetNumVertices() + 1)));
   CUDA_CHECK(cudaMalloc(&colidx_, sizeof(vid_t) * graph.GetNumEdges() * 2));
+  CUDA_CHECK(cudaMalloc(&degree_, sizeof(uint32_t) * graph.GetNumVertices()));
   // CUDA_CHECK(cudaMalloc(&rowidx_, sizeof(vid_t) * graph.GetNumEdges() * 2));
   CUDA_CHECK(cudaMemcpy(rowoffset_, rowoffset_cpu, sizeof(vid_t) * (graph.GetNumVertices() + 1), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(colidx_, colidx_cpu, sizeof(vid_t) * graph.GetNumEdges() * 2, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(degree_, degree_cpu, sizeof(uint32_t) * graph.GetNumVertices(), cudaMemcpyHostToDevice));
   // CUDA_CHECK(cudaMemcpy(rowidx_, rowidx_cpu, sizeof(vid_t) * graph.GetNumEdges() * 2, cudaMemcpyHostToDevice));
 
   size_t total_mem = sizeof(vid_t) * (graph.GetNumVertices() + 1) + sizeof(vid_t) * graph.GetNumEdges() * 2;
