@@ -220,7 +220,7 @@ void Graph::ConvertToCsr(){
     delete[] colidx_cpu_;
   rowoffset_cpu_ = new vid_t[num_vertices_ + 1];
   colidx_cpu_ = new vid_t[num_edges_ * 2];
-  degree_cpu_ = new uint32_t[num_vertices_];
+  degree_cpu_ = new int32_t[num_vertices_];
   vid_t edge_cpu = 0;
   for (vid_t i = 0; i < num_vertices_; i++)
   {

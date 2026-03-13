@@ -21,7 +21,7 @@ public:
   size_t degeneracy_ = 0;
   vid_t *rowoffset_cpu_ = nullptr;
   vid_t *colidx_cpu_ = nullptr;
-  uint32_t *degree_cpu_ = nullptr;
+  int32_t *degree_cpu_ = nullptr;
 
   inline void ApplyOrder(const std::vector<vid_t>  &order);
   void SortByDegreeAsc();

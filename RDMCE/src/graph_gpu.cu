@@ -1,5 +1,6 @@
 #include "graph_gpu.cuh"
 #include <cstdint>
+#include <cuda_runtime_api.h>
 
 __host__ void GraphGpu::LoadFromCpu(Graph &graph, bool print)
 {
@@ -7,13 +8,13 @@ __host__ void GraphGpu::LoadFromCpu(Graph &graph, bool print)
   assert(rowoffset_ == nullptr && colidx_ == nullptr);
   vid_t *rowoffset_cpu;
   vid_t *colidx_cpu;
-  uint32_t *degree_cpu;
+  int32_t *degree_cpu;
 
 
   if(graph.GetRowOffset() == nullptr || graph.GetColIdx() == nullptr){
     rowoffset_cpu = new vid_t[graph.GetNumVertices() + 1];
     colidx_cpu = new vid_t[graph.GetNumEdges() * 2];
-    degree_cpu = new uint32_t[graph.GetNumVertices()];
+    degree_cpu = new int32_t[graph.GetNumVertices()];
     // vid_t *rowidx_cpu = new vid_t[graph.GetNumEdges() * 2];
     vid_t edge_cpu = 0;
 
@@ -70,9 +71,11 @@ __host__ void GraphGpu::Free()
     CUDA_CHECK(cudaFree(rowoffset_));
   if (colidx_ != nullptr)
     CUDA_CHECK(cudaFree(colidx_));
+  if (degree_ != nullptr) cudaFree(degree_);
   // if (rowidx_ != nullptr)
   //   CUDA_CHECK(cudaFree(rowidx_));
   rowoffset_ = nullptr;
   colidx_ = nullptr;
+  degree_ = nullptr;
   // rowidx_ = nullptr;
 }
