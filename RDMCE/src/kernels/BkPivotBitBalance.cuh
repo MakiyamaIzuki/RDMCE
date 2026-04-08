@@ -1,5 +1,6 @@
 #pragma once
 #include "common.cuh"
+#include "queue.h"
 #include "context_gpu.cuh"
 #include "graph_gpu.cuh"
 #include "mce_gpu.cuh"
@@ -727,6 +728,49 @@ __global__ void Peel1_v2(GraphGpu const g, auto* counter, auto* survival, auto* 
     if (threadIdx.x == 0) atomicAdd(counter + 1, cnt);
 }
 
+__global__ void Sieve1_v3(GraphGpu const g, auto* flag, auto const* __restrict__ degree, auto* next, auto* cursor)
+{
+    val TID = blockDim.x * blockIdx.x + threadIdx.x;
+    val LID = TID & 0x1f;
+    val STRIDE = blockDim.x * gridDim.x;
+    val END = ((g.num_vertices_ + 31) >> 5) << 5;
+    for (var i = TID; i < END; i += STRIDE) {
+        val deg = degree[i];
+        val hit = i < g.num_vertices_ && deg < 3;
+        uint32_t mask = __ballot_sync(0xffff'ffffU, hit);
+        uint32_t offset = __popc(mask & ((1U << LID) - 1));
+        flag[i] = (deg == 2) << 2 | (deg == 1) << 1 | 1;
+        uint32_t cur = LID == 0 ? atomicAdd(cursor, __popc(mask)) : 0U;
+        cur = __shfl_sync(0xffff'ffffU, cur, 0);
+        if (hit) next[cur + offset] = i;
+    }
+}
+
+__global__ void Sieve_v3(GraphGpu const g, auto* degree, auto* next, auto* cursor)
+{
+    val TID = blockDim.x * blockIdx.x + threadIdx.x;
+    val LID = TID & 0x1f;
+    val STRIDE = blockDim.x * gridDim.x;
+    val END = ((g.num_vertices_ + 31) >> 5) << 5;
+    for (var i = TID; i < END; i += STRIDE) {
+        val hit = i < g.num_vertices_ && degree[i] < 3;
+        val mask = __ballot_sync(0xffff'ffffU, hit);
+        val offset = __popc(mask & ((1U << LID) - 1));
+    }
+}
+
+template <typename vid_t>
+__global__ void filter1(GraphGpu const g, auto const* __restrict__ degree, gkp::Queue<vid_t> d1, gkp::Queue<vid_t> d2)
+{
+    val TID = blockDim.x * blockIdx.x + threadIdx.x;
+    val LID = TID & 0x1f;
+    val STRIDE = blockDim.x * gridDim.x;
+    val END = ((g.num_vertices_ + 31) >> 5) << 5;
+    for (var i = TID; i < END; i += STRIDE) {
+        d1.addWarpwise(i, i < g.num_vertices_ && degree[i] == 1);
+        d2.addWarpwise(i, i < g.num_vertices_ && degree[i] == 2);
+    }
+}
 
 __global__ void SieveD2(GraphGpu const g, auto* degree, auto* next, auto* cursor)
 {
