@@ -4,11 +4,28 @@ AlignAfterOpenBracket: AlwaysBreak
 AlignOperands: AlignAfterOperator
 AllowAllArgumentsOnNextLine: true
 AllowAllParametersOfDeclarationOnNextLine: true
+AllowShortIfStatementsOnASingleLine: true
 AlwaysBreakBeforeMultilineStrings: true
 AlwaysBreakTemplateDeclarations: Yes
-BinPackArguments: false
+BinPackArguments: true
 BinPackParameters: false
-  #BreakBeforeBraces: Stroustrup
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterClass: true
+  AfterControlStatement: MultiLine
+  AfterEnum: true
+  AfterFunction: true
+  AfterNamespace: true
+  AfterStruct: true
+  AfterUnion: true
+  AfterExternBlock: true
+  BeforeCatch: true
+  BeforeElse: true
+  BeforeLambdaBody: false
+  BeforeWhile: false
+  SplitEmptyFunction: false
+  SplitEmptyRecord: false
+  SplitEmptyNamespace: false
 ColumnLimit: 100
 Cpp11BracedListStyle: false
 EmptyLineBeforeAccessModifier: LogicalBlock
@@ -25,12 +42,4 @@ SpaceBeforeCpp11BracedList: true
 Standard: c++20
 UseCRLF: false
 UseTab: Never
-BraceWrapping:
-  AfterClass: true
-  AfterControlStatement: true
-  AfterFunction: true
-  AfterNamespace: true
-  AfterStruct: true
-  AfterUnion: true
-  BeforeElse: true
 
