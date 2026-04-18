@@ -78,30 +78,23 @@ __global__ void peelingLeaf(
     if (tid == 0) LOG("");
     uint32_t cnt = 0;
     for (var i = tid; i < end; i += stride) {
-        var u = INVALID_VID;
+        var a = INVALID_VID;
         if (val v = i < d1.size() ? d1[i] : 0; i < d1.size() && survival[v]) {
             survival[v] = 0;
-            cnt += atomicSub(degree + v, 1) > 1 ? 1 : 0;
+            cnt += atomicSub(degree + v, 1) > 0 ? 1 : 0;
             for (var j = g.rowoffset_[v]; j < g.rowoffset_[v + 1]; ++j) {
-                u = g.colidx_[j];
-                if (degree[u] <= 0 || survival[u] == 0) {
-                    u = INVALID_VID;
-                }
-                else {
+                if (val u = g.colidx_[j]; survival[u]) {
                     val t = atomicSub(degree + u, 1);
-                    if (t == 1) survival[u] = 0;
                     cnt += t > 0 ? 1 : 0;
-                    if (t != 2 && t != 3) u = INVALID_VID;
+                    if (t == 1) survival[u] = 0;
+                    if (t != 2 && t != 3) a = u;
                 }
             }
         }
-        next.addWarpwise(u, u != INVALID_VID);
+        next.addWarpwise(a, a != INVALID_VID);
     }
     cnt = sumBlockwise(cnt);
-    if (tid == 0) {
-        d1.clear();
-        atomicAdd(count, cnt);
-    }
+    if (threadIdx.x == 0) atomicAdd(count, cnt);
 }
 
 template <typename VERTEX>
@@ -198,27 +191,39 @@ __global__ void peelingBridge(
                     nghb1 = u;
                 }
             }
-            // Go through N(n_1), for n_2 might be invalid.
-            for (var j = g.rowoffset_[nghb1]; j < g.rowoffset_[nghb1 + 1]; ++j) {
-                if (g.colidx_[j] == nghb2) isTriangle = true;
-            }
-
-            if (!isTriangle) {
-                int32_t t;
+            if (nghb1 == INVALID_VID) {
                 survival[v] = 0;
-                t = atomicSub(degree + v, 2);
-                cnt += max(t, 0);
-                if (nghb1 != INVALID_VID && survival[nghb1]) {
-                    t = atomicSub(degree + nghb1, 1);
-                    if (t > 0) ++cnt;
-                    if (t <= 1) survival[nghb1] = 0;
-                    if (t != 2 && t != 3) nghb1 = INVALID_VID;
+                degree[v] = 0;
+                LOG("");
+            }
+            else {
+                for (var j = g.rowoffset_[nghb1]; j < g.rowoffset_[nghb1 + 1]; ++j) {
+                    if (g.colidx_[j] == nghb2) {
+                        isTriangle = true;
+                        nghb1 = nghb2 = INVALID_VID;
+                        break;
+                    }
                 }
-                if (nghb2 != INVALID_VID && survival[nghb2]) {
-                    t = atomicSub(degree + nghb2, 1);
-                    if (t > 0) ++cnt;
-                    if (t <= 1) survival[nghb2] = 0;
-                    if (t != 2 && t != 3) nghb2 = INVALID_VID;
+
+                if (!isTriangle) {
+                    int32_t t;
+                    survival[v] = 0;
+                    // `t` can be negative, for a cascaded vertex may be added into frontier queue
+                    // more than one times.
+                    t = atomicExch(degree + v, 0);
+                    cnt += max(t, 0);
+                    if (nghb1 != INVALID_VID && survival[nghb1]) {
+                        t = atomicSub(degree + nghb1, 1);
+                        if (t > 0) ++cnt;
+                        if (t <= 1) survival[nghb1] = 0;
+                        if (t != 2 && t != 3) nghb1 = INVALID_VID;
+                    }
+                    if (nghb2 != INVALID_VID && survival[nghb2]) {
+                        t = atomicSub(degree + nghb2, 1);
+                        if (t > 0) ++cnt;
+                        if (t <= 1) survival[nghb2] = 0;
+                        if (t != 2 && t != 3) nghb2 = INVALID_VID;
+                    }
                 }
             }
         }
@@ -226,10 +231,7 @@ __global__ void peelingBridge(
         next.addWarpwise(nghb2, nghb2 != INVALID_VID, __activemask());
     }
     cnt = sumBlockwise(cnt);
-    if (tid == 0) {
-        d2.clear();
-        atomicAdd(count, cnt);
-    }
+    if (threadIdx.x == 0) atomicAdd(count, cnt);
 }
 
 #undef var

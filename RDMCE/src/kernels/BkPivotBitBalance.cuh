@@ -1078,10 +1078,11 @@ acc_t BkSolverWrapper(Graph &graph, size_t device_id)
   LOG("sd1 = ", sd1, " sd2 = ", sd2);
   while (true) {
         gkp::peelingLeaf<<<sm_num * BLOCK_PER_SM, 32 * WARP_PER_BLOCK, 0, stream1>>>(graph_gpu, graph_gpu.degree_, survival, d1, counter, f1);
-        gkp::peelingBridge<<<sm_num * BLOCK_PER_SM, 32 * WARP_PER_BLOCK, 0, stream2>>>(graph_gpu, graph_gpu.degree_, survival, d2, f1, counter);
+        gkp::peelingBridge<<<sm_num * BLOCK_PER_SM, 32 * WARP_PER_BLOCK, 0, stream2>>>(graph_gpu, graph_gpu.degree_, survival, d2, f1, counter + 1);
         cudaDeviceSynchronize();
+        d1.clear();
+        d2.clear();
         gkp::peelingFilter<<<sm_num * BLOCK_PER_SM, 32 * WARP_PER_BLOCK, 0, stream2>>>(graph_gpu, graph_gpu.degree_, survival, f1, d1, d2);
-  //      gkp::peelingFirstFilter<<<sm_num * BLOCK_PER_SM, 32 * WARP_PER_BLOCK>>>(graph_gpu, graph_gpu.degree_, d1, d2);
         cudaDeviceSynchronize();
         ++peeling_round;
         cudaMemcpy(counter_h + 4, counter, 4 * sizeof(uint32_t), cudaMemcpyDeviceToHost);
@@ -1089,6 +1090,10 @@ acc_t BkSolverWrapper(Graph &graph, size_t device_id)
         if (counter_h[1] == counter_h[5] && counter_h[0] == counter_h[4]) break;
         memcpy(counter_h, counter_h + 4, 4 * sizeof(uint32_t));
   }
+  gkp::Queue<uint32_t>::Free(f2);
+  gkp::Queue<uint32_t>::Free(f1);
+  gkp::Queue<uint32_t>::Free(d2);
+  gkp::Queue<uint32_t>::Free(d1);
   cub::DeviceScan::ExclusiveSum(nullptr, temp_storage_size, graph_gpu.degree_, offset_offset, graph_gpu.num_vertices_);
   cudaMalloc(&temp_storage, temp_storage_size);
   cub::DeviceScan::ExclusiveSum(temp_storage, temp_storage_size, graph_gpu.degree_, offset_offset, graph_gpu.num_vertices_);
@@ -1122,7 +1127,7 @@ acc_t BkSolverWrapper(Graph &graph, size_t device_id)
   // BkpbKernel<<<1, 32>>>(graph_gpu, context_gpu);
 
   CUDA_CHECK(cudaDeviceSynchronize());
-  auto mc_num = context_gpu.GetMcNum() + counter_h[4] / 2 + counter_h[5];
+  auto mc_num = context_gpu.GetMcNum() + counter_h[4] / 2 + counter_h[5] / 2;
   // free memory
   graph_gpu.Free();
   // context_gpu.bitmaps_.Free();

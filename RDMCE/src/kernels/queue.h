@@ -29,7 +29,15 @@ struct Queue
         CUDA_INVOKE(cudaMemset, w, 0, sizeof(int32_t));
         CUDA_INVOKE(cudaMalloc, &r, sizeof(int32_t));
         CUDA_INVOKE(cudaMemset, r, 0, sizeof(int32_t));
+        LOG("Constructing queue. base = ", b);
         return Queue(b, capacity, w, r);
+    }
+
+    static void Free(Queue<T> q)
+    {
+        CUDA_INVOKE(cudaFree, q.base);
+        CUDA_INVOKE(cudaFree, q.wptr);
+        CUDA_INVOKE(cudaFree, q.rptr);
     }
 
     T* base;
@@ -74,20 +82,27 @@ struct Queue
     __host__ ~Queue()
     {}
 
+#if __CUDA_ARCH__
     __forceinline__ __device__ void clear(void)
     {
         atomicExch(wptr, 0);
         atomicExch(rptr, 0);
     }
+#else
+    inline void clear(void)
+    {
+        // TODO: Use async function
+        CUDA_INVOKE(cudaMemset, wptr, 0, sizeof(*wptr));
+        CUDA_INVOKE(cudaMemset, rptr, 0, sizeof(*wptr));
+    }
+#endif
 
 #if __CUDA_ARCH__
     __forceinline__ __device__ ssize_t size(void) const
     {
         return *wptr - *rptr;
     }
-#endif
-
-#ifndef __CUDA_ARCH__
+#else
     inline ssize_t size(void) const
     {
         int32_t buf[2];
@@ -101,7 +116,7 @@ struct Queue
     {
 #if DEBUG
         if (x >= size() || static_cast<int64_t>(x) & (1ULL << 63)) {
-            LOG("Out of range. x = ", x, " size = ", size());
+            LOG("Out of range. base = ", base, " x = ", x, " size = ", size());
             assert(0);
         }
 #endif // DEBUG
@@ -113,7 +128,7 @@ struct Queue
     {
 #if DEBUG
         if (x >= size() || static_cast<int64_t>(x) & (1ULL << 63)) {
-            LOG("Out of range. x = ", x, " size = ", size());
+            LOG("Out of range. base = ", base, " x = ", x, " size = ", size());
             assert(0);
         }
 #endif // DEBUG
@@ -125,7 +140,7 @@ struct Queue
     {
 #if DEBUG
         if (x >= size() || static_cast<int64_t>(x) & (1ULL << 63)) {
-            LOG("Out of range. x = ", x, " size = ", size());
+            LOG("Out of range. base = ", base, " x = ", x, " size = ", size());
             assert(0);
         }
 #endif // DEBUG
@@ -141,7 +156,7 @@ struct Queue
 #if DEBUG
         __syncwarp();
         if (__activemask() != 0xffff'ffffU) {
-            LOG("Divergent Deadlock. mask = 0xffff'ffff", " activemask = ", __activemask());
+            LOG("Divergent Deadlock. base = ", base, " mask = 0xffff'ffff", " activemask = ", __activemask());
             assert(0);
         }
 #endif // DEBUG
@@ -152,7 +167,7 @@ struct Queue
         pos = __shfl_sync(0xffff'ffffU, pos, 0);
 #if DEBUG
         if (pos + off >= capacity) {
-            LOG("Overflow. capacity = ", capacity);
+            LOG("Overflow. base = ", base, " capacity = ", capacity);
             assert(0);
         }
 #endif // DEBUG
@@ -166,7 +181,7 @@ struct Queue
 #if DEBUG
         __syncwarp(mask);
         if ((mask & __activemask()) != mask) {
-            LOG("Divergent Deadlock mask = ", mask, " activemask = ", __activemask());
+            LOG("Divergent Deadlock. base = ", base, " mask = ", mask, " activemask = ", __activemask());
             assert(0);
         }
 #endif // DEBUG
@@ -178,7 +193,7 @@ struct Queue
         pos = __shfl_sync(mask, pos, leader);
 #if DEBUG
         if (pos + off >= capacity) {
-            LOG("Overflow. capacity = ", capacity);
+            LOG("Overflow. base = ", base, " capacity = ", capacity);
             assert(0);
         }
 #endif // DEBUG

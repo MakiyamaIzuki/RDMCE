@@ -25,11 +25,11 @@ constexpr uint32_t INVALID_VID = 0xffff'ffffU;
 #elif defined(__CUDA_ARCH__)
 #define LOG(...)                                                                                   \
     gkp::deprint(                                                                                  \
-        __func__, "(", gkp::get_filename(__FILE__), ":", __LINE__, ") <<< ", blockIdx.x, ", ",     \
-        threadIdx.x, " >>> ", ##__VA_ARGS__)
+        __func__, '(', gkp::get_filename(__FILE__), ':', __LINE__, ") @ [", blockIdx.x, '/',       \
+        gridDim.x, ", ", threadIdx.x, '/', blockDim.x, "]: ", ##__VA_ARGS__)
 #else
 #define LOG(...)                                                                                   \
-    gkp::heprint(__func__, "(", gkp::get_filename(__FILE__), ":", __LINE__, ") ", ##__VA_ARGS__)
+    gkp::heprint(__func__, '(', gkp::get_filename(__FILE__), ':', __LINE__, "): ", ##__VA_ARGS__)
 #endif
 
 #if DEBUG
@@ -87,14 +87,20 @@ template <typename T>
 __device__ void deprint1(T x)
 {
     using U = std::remove_cvref_t<T>;
-    if constexpr (std::is_same_v<U, char*> || std::is_same_v<U, char const*>) {
-        printf(x);
+    if constexpr (std::is_same_v<char, U>) {
+        printf("%c", x);
+    }
+    else if constexpr (std::is_same_v<U, char*> || std::is_same_v<U, char const*>) {
+        printf("%s", x);
+    }
+    else if constexpr (std::is_pointer_v<U>) {
+        printf("%p", x);
     }
     else if constexpr (std::is_integral_v<U> && std::is_signed_v<U>) {
-        printf("%llu", static_cast<uint64_t>(x));
+        printf("%lld", static_cast<int64_t>(x));
     }
     else if constexpr (std::is_integral_v<U> && std::is_unsigned_v<U>) {
-        printf("%lld", static_cast<int64_t>(x));
+        printf("%llu", static_cast<uint64_t>(x));
     }
 }
 
