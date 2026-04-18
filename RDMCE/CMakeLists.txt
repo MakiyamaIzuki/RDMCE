@@ -28,7 +28,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include_directories(${PROJECT_SOURCE_DIR}/include)
 
 # Use native CUDA architecture detection (CMake 3.24+)
-set(CMAKE_CUDA_ARCHITECTURES native)
+# set(CMAKE_CUDA_ARCHITECTURES native)
+set(CMAKE_CUDA_ARCHITECTURES 86)
 
 # Collect all source files
 file(GLOB_RECURSE SOURCES "src/*.cc" "src/*.cpp" "src/*.cu" "main.cc")
@@ -66,10 +67,10 @@ endif()
 
 # Set optimization flags based on compiler
 if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -g -std=c++20 -march=native -DDEBUG")
 elseif (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /O2")
 endif()
 
 # Set CUDA optimization flags
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3 -G -DDEBUG")

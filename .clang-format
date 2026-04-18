@@ -4,11 +4,11 @@ AlignAfterOpenBracket: AlwaysBreak
 AlignOperands: AlignAfterOperator
 AllowAllArgumentsOnNextLine: true
 AllowAllParametersOfDeclarationOnNextLine: true
-AllowShortIfStatementsOnASingleLine: true
+AllowShortIfStatementsOnASingleLine: WithoutElse
 AlwaysBreakBeforeMultilineStrings: true
 AlwaysBreakTemplateDeclarations: Yes
 BinPackArguments: true
-BinPackParameters: false
+BinPackParameters: OnePerLine
 BreakBeforeBraces: Custom
 BraceWrapping:
   AfterClass: true
@@ -34,12 +34,11 @@ IncludeBlocks: Regroup
 IndentWidth: 4
 PointerAlignment: Left
 ReferenceAlignment: Left
-ReflowComments: true
-SortUsingDeclarations: true
+ReflowComments: Always
+SortUsingDeclarations: LexicographicNumeric
 SpaceAfterCStyleCast: false
 SpaceAfterLogicalNot: false
 SpaceBeforeCpp11BracedList: true
 Standard: c++20
 UseCRLF: false
 UseTab: Never
-

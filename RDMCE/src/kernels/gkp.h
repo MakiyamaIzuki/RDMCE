@@ -3,20 +3,35 @@
 #define GKP_H
 
 #include "cuda.h"
-#include "cuda_runtime.h"
+#include "cuda_runtime_api.h"
 
+#include <cassert>
 #include <cstdint>
-#include <format>
+#include <type_traits>
+
+#ifndef __CUDA_ARCH__
 #include <iostream>
 #include <string>
 #include <string_view>
+#endif
 
 namespace gkp
 {
 
 constexpr uint32_t INVALID_VID = 0xffff'ffffU;
 
-#define LOG(...) eprint(std::format("%s(%d)", __func__, __LINE__), ##__VA_ARGS__)
+#ifndef DEBUG
+#define LOG(...) ((void)(0))
+#elif defined(__CUDA_ARCH__)
+#define LOG(...)                                                                                   \
+    gkp::deprint(                                                                                  \
+        __func__, "(", gkp::get_filename(__FILE__), ":", __LINE__, ") <<< ", blockIdx.x, ", ",     \
+        threadIdx.x, " >>> ", ##__VA_ARGS__)
+#else
+#define LOG(...)                                                                                   \
+    gkp::heprint(__func__, "(", gkp::get_filename(__FILE__), ":", __LINE__, ") ", ##__VA_ARGS__)
+#endif
+
 #if DEBUG
 #define CUDA_INVOKE(fun, ...)                                                                      \
     do {                                                                                           \
@@ -25,8 +40,8 @@ constexpr uint32_t INVALID_VID = 0xffff'ffffU;
                 !std::string_view(#fun).ends_with("Async"),                                        \
             "Only for CUDA synchronized API.");                                                    \
         if (auto e = fun(__VA_ARGS__); e != cudaSuccess) {                                         \
-            printf("%s(%d): %s\n", __func__, __LINE__, cudaGetErrorString(e));                     \
-            exit(__LINE__);                                                                        \
+            LOG(cudaGetErrorString(e));                                                            \
+            assert(0);                                                                             \
         }                                                                                          \
     } while (0)
 #else
@@ -40,12 +55,68 @@ constexpr uint32_t INVALID_VID = 0xffff'ffffU;
     } while (0)
 #endif // DEBUG
 
+consteval char const* get_filename(char const* path)
+{
+    auto file = path;
+    while (*path) {
+        if (*path == '/' || *path == '\\') {
+            file = path + 1;
+        }
+        ++path;
+    }
+    return file;
+}
+
+struct Logger
+{
+    int writing = 0;
+    __device__ void acquire()
+    {
+        while (atomicCAS(&this->writing, 0, 1) == 1)
+            ;
+    }
+    __device__ void release()
+    {
+        atomicExch(&this->writing, 0);
+    }
+};
+
+__device__ static Logger logger;
+
+template <typename T>
+__device__ void deprint1(T x)
+{
+    using U = std::remove_cvref_t<T>;
+    if constexpr (std::is_same_v<U, char*> || std::is_same_v<U, char const*>) {
+        printf(x);
+    }
+    else if constexpr (std::is_integral_v<U> && std::is_signed_v<U>) {
+        printf("%llu", static_cast<uint64_t>(x));
+    }
+    else if constexpr (std::is_integral_v<U> && std::is_unsigned_v<U>) {
+        printf("%lld", static_cast<int64_t>(x));
+    }
+}
+
+#if __CUDA_ARCH__
 template <typename... T>
-void eprint(T&&... args)
+__device__ void deprint(T const&... args)
+{
+    logger.acquire();
+    (deprint1(args), ...);
+    deprint1("\n");
+    logger.release();
+}
+#endif
+
+#ifndef __CUDA_ARCH__
+template <typename... T>
+void heprint(T const&... args)
 {
     ((std::cerr << args), ...);
     std::cerr << std::endl;
 }
+#endif
 
 __device__ __forceinline__ auto get_lane_id()
 {
@@ -64,11 +135,12 @@ __forceinline__ __device__ Addable sumBlockwise(Addable a)
     if (blockDim.x > 1024 || blockDim.y > 1 || blockDim.z > 1 || (blockDim.x & 0x1f)) {
         LOG("Incompatible configuration blockDim = {", blockDim.x, ", ", blockDim.y, ", ",
             blockDim.z, "}");
-        exit(__LINE__);
+        assert(0);
     }
+    __syncwarp();
     if (__activemask() != 0xffff'ffffU) {
-        LOG("Divergent deadlock activemast = ", std::format("%x", __activemask()));
-        exit(__LINE__);
+        LOG("Divergent deadlock. activemask = ", __activemask());
+        assert(0);
     }
 #endif // DEBUG
     a += __shfl_xor_sync(0xffff'ffffU, a, 1);
