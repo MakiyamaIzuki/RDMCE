@@ -1066,8 +1066,8 @@ acc_t BkSolverWrapper(Graph &graph, size_t device_id)
   cudaDeviceSetLimit(cudaLimitPrintfFifoSize, 10 * 1024 * 1024); // TODO: Remove this upon releasing
 
   gkp::peelingFirstFilter<<<sm_num * BLOCK_PER_SM, 32 * WARP_PER_BLOCK>>>(graph_gpu, graph_gpu.degree_, d1, d2);
-  auto const sd1 = d1.size();
-  auto const sd2 = d2.size();
+  auto sd1 = d1.size();
+  auto sd2 = d2.size();
   auto f1 = gkp::Queue<uint32_t>::Generate((sd1 + sd2) << 2);
   auto f2 = gkp::Queue<uint32_t>::Generate((sd1 + sd2) << 2);
   // auto d3 = gkp::Queue<uint32_t>::Generate(sd2);
@@ -1077,13 +1077,18 @@ acc_t BkSolverWrapper(Graph &graph, size_t device_id)
   cudaStreamCreate(&stream2);
   LOG("sd1 = ", sd1, " sd2 = ", sd2);
   while (true) {
-        gkp::peelingLeaf<<<sm_num * BLOCK_PER_SM, 32 * WARP_PER_BLOCK, 0, stream1>>>(graph_gpu, graph_gpu.degree_, survival, d1, counter, f1);
-        gkp::peelingBridge<<<sm_num * BLOCK_PER_SM, 32 * WARP_PER_BLOCK, 0, stream2>>>(graph_gpu, graph_gpu.degree_, survival, d2, f1, counter + 1);
+        auto blockNum =  (sd1 + sd2) / 160 + 1;
+        gkp::peelingLeaf<<<blockNum, 32 * WARP_PER_BLOCK, 0, stream1>>>(graph_gpu, graph_gpu.degree_, survival, d1, counter, f1);
+        gkp::peelingBridge<<<blockNum, 32 * WARP_PER_BLOCK, 0, stream2>>>(graph_gpu, graph_gpu.degree_, survival, d2, f1, counter + 1);
         cudaDeviceSynchronize();
         d1.clear();
         d2.clear();
-        gkp::peelingFilter<<<sm_num * BLOCK_PER_SM, 32 * WARP_PER_BLOCK, 0, stream2>>>(graph_gpu, graph_gpu.degree_, survival, f1, d1, d2);
+        gkp::peelingFilter<<<blockNum, 32 * WARP_PER_BLOCK, 0, stream2>>>(graph_gpu, graph_gpu.degree_, survival, f1, d1, d2);
         cudaDeviceSynchronize();
+        f1.clear();
+        sd1 = d1.size();
+        sd2 = d2.size();
+        LOG("d1.size = ", d1.size(), " d2.size = ", d2.size());
         ++peeling_round;
         cudaMemcpy(counter_h + 4, counter, 4 * sizeof(uint32_t), cudaMemcpyDeviceToHost);
         LOG("peeling_round = ", peeling_round, " counter_h[4] = ", counter_h[4], " counter_h[5] = ", counter_h[5]);
@@ -1094,6 +1099,7 @@ acc_t BkSolverWrapper(Graph &graph, size_t device_id)
   gkp::Queue<uint32_t>::Free(f1);
   gkp::Queue<uint32_t>::Free(d2);
   gkp::Queue<uint32_t>::Free(d1);
+  FinalizePeeling<<<sm_num * BLOCK_PER_SM, 32 * WARP_PER_BLOCK>>>(reduced_graph_gpu.num_vertices_, graph_gpu.degree_, survival);
   cub::DeviceScan::ExclusiveSum(nullptr, temp_storage_size, graph_gpu.degree_, offset_offset, graph_gpu.num_vertices_);
   cudaMalloc(&temp_storage, temp_storage_size);
   cub::DeviceScan::ExclusiveSum(temp_storage, temp_storage_size, graph_gpu.degree_, offset_offset, graph_gpu.num_vertices_);
@@ -1111,7 +1117,6 @@ acc_t BkSolverWrapper(Graph &graph, size_t device_id)
   cudaMalloc(&reduced_graph_gpu.rowoffset_, (reduced_graph_gpu.num_vertices_ + 1) * sizeof(vid_t));
   cudaMalloc(&reduced_graph_gpu.colidx_, (reduced_graph_gpu.num_edges_ << 1) * sizeof(vid_t));
 
-  FinalizePeeling<<<sm_num * BLOCK_PER_SM, 32 * WARP_PER_BLOCK>>>(reduced_graph_gpu.num_vertices_, graph_gpu.degree_, survival);
   Rebuild<<<sm_num * BLOCK_PER_SM, 32 * WARP_PER_BLOCK>>>(graph_gpu, reduced_graph_gpu, graph_gpu.degree_, survival, new_vid, offset_offset);
   cudaFree(offset_offset);
   cudaFree(new_vid);

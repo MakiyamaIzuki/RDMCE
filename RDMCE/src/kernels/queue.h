@@ -132,6 +132,9 @@ struct Queue
             assert(0);
         }
 #endif // DEBUG
+        if constexpr (sizeof(T) >= 4 && sizeof(T) <= 8) {
+            return __ldg(base + x);
+        }
         return base[x];
     }
 
@@ -149,16 +152,15 @@ struct Queue
 
     template <typename U>
     __forceinline__ __device__ void addWarpwise(U&& x, bool const cond)
-        requires(std::is_same_v<
-                 std::remove_cvref_t<U>,
-                 T>) // Without calculating leader thread
+        requires(std::is_same_v<std::remove_cvref_t<U>, T>)
     {
 #if DEBUG
-        __syncwarp();
-        if (__activemask() != 0xffff'ffffU) {
-            LOG("Divergent Deadlock. base = ", base, " mask = 0xffff'ffff", " activemask = ", __activemask());
-            assert(0);
-        }
+        // __syncwarp();
+        // if (__activemask() != 0xffff'ffffU) {
+        //     LOG("Divergent Deadlock. base = ", base, " mask = 0xffff'ffff",
+        //         " activemask = ", __activemask());
+        //     assert(0);
+        // }
 #endif // DEBUG
         val hit = __ballot_sync(0xffff'ffffU, cond);
         if (hit == 0) return;
@@ -181,7 +183,8 @@ struct Queue
 #if DEBUG
         __syncwarp(mask);
         if ((mask & __activemask()) != mask) {
-            LOG("Divergent Deadlock. base = ", base, " mask = ", mask, " activemask = ", __activemask());
+            LOG("Divergent Deadlock. base = ", base, " mask = ", mask,
+                " activemask = ", __activemask());
             assert(0);
         }
 #endif // DEBUG

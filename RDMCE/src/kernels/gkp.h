@@ -55,6 +55,13 @@ constexpr uint32_t INVALID_VID = 0xffff'ffffU;
     } while (0)
 #endif // DEBUG
 
+template <typename T>
+constexpr T align32(T x)
+    requires (std::is_integral_v<T>)
+{
+    return (x + 31) & ~static_cast<T>(31);
+}
+
 consteval char const* get_filename(char const* path)
 {
     auto file = path;
