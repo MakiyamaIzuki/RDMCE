@@ -20,6 +20,9 @@ namespace gkp
 
 constexpr uint32_t INVALID_VID = 0xffff'ffffU;
 
+#define PRINT(...)                                                                                   \
+    gkp::heprint(__func__, '(', gkp::get_filename(__FILE__), ':', __LINE__, "): ", ##__VA_ARGS__)
+
 #ifndef DEBUG
 #define LOG(...) ((void)(0))
 #elif defined(__CUDA_ARCH__)
@@ -111,7 +114,6 @@ __device__ void deprint1(T x)
     }
 }
 
-#if __CUDA_ARCH__
 template <typename... T>
 __device__ void deprint(T const&... args)
 {
@@ -120,16 +122,12 @@ __device__ void deprint(T const&... args)
     deprint1("\n");
     logger.release();
 }
-#endif
-
-#ifndef __CUDA_ARCH__
 template <typename... T>
 void heprint(T const&... args)
 {
     ((std::cerr << args), ...);
     std::cerr << std::endl;
 }
-#endif
 
 __device__ __forceinline__ auto get_lane_id()
 {
