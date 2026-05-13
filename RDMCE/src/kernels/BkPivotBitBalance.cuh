@@ -10,7 +10,6 @@
 #include <cassert>
 #include <cerrno>
 #include <chrono>
-#include <concepts>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -603,332 +602,6 @@ __launch_bounds__(32 * WARP_PER_BLOCK, 1) __global__
 
 #define val auto const
 #define var auto
-// The number of threads per block should be not greater than 1024, and be a multiple of 32.
-// Only threads with threadIdx.x < 32 can obtain the summation.
-template <typename Addable>
-    requires(std::integral<Addable> || std::floating_point<Addable>) && (sizeof(Addable) >= 4)
-__forceinline__ __device__ Addable Sum(Addable a)
-{
-    a += __shfl_xor_sync(0xffff'ffff, a, 1);
-    a += __shfl_xor_sync(0xffff'ffff, a, 2);
-    a += __shfl_xor_sync(0xffff'ffff, a, 4);
-    a += __shfl_xor_sync(0xffff'ffff, a, 8);
-    a += __shfl_xor_sync(0xffff'ffff, a, 16);
-    __shared__ Addable t[32];
-    val WID = threadIdx.x >> 5;
-    if ((threadIdx.x & 0x1f) == 0) t[WID] = a;
-    __syncthreads();
-    if (WID == 0) {
-        a = threadIdx.x < ((blockDim.x + 31) >> 5) ? t[threadIdx.x] : static_cast<Addable>(0);
-        a += __shfl_xor_sync(0xffff'ffff, a, 1);
-        a += __shfl_xor_sync(0xffff'ffff, a, 2);
-        a += __shfl_xor_sync(0xffff'ffff, a, 4);
-        a += __shfl_xor_sync(0xffff'ffff, a, 8);
-        a += __shfl_xor_sync(0xffff'ffff, a, 16);
-    }
-    __syncthreads(); // In case that this kernel is successively invoked, ...
-    return a;
-}
-
-__global__ void Peel0(GraphGpu const g, auto* counter, auto* survival, auto* degree)
-{
-    auto const TID = blockDim.x * blockIdx.x + threadIdx.x;
-    uint32_t cnt = 0;
-    for (uint32_t i = TID; i < g.num_vertices_; i += blockDim.x * gridDim.x) {
-        if (degree[i] == 0) {
-            ++cnt;
-            survival[i] = 0;
-        }
-    }
-    auto t = Sum(cnt);
-    if (threadIdx.x == 0) atomicAdd(counter, t);
-}
-
-__global__ void SieveD1(GraphGpu const g, auto* degree, auto* next, auto* cursor)
-{
-    val TID = blockDim.x * blockIdx.x + threadIdx.x;
-    val LID = TID & 0x1f;
-    val STRIDE = blockDim.x * gridDim.x;
-    val END = ((g.num_vertices_ + 31) >> 5) << 5;
-    for (var i = TID; i < END; i += STRIDE) {
-        val hit = i < g.num_vertices_ && degree[i] == 1;
-        val mask = __ballot_sync(0xffff'ffffU, hit);
-        val offset = __popc(mask & ((1U << LID) - 1));
-        uint32_t cur;
-        if (LID == 0) cur = atomicAdd(cursor, __popc(mask));
-        cur = __shfl_sync(0xffff'ffffU, cur, 0);
-        if (hit) next[cur + offset] = i;
-    }
-}
-
-__global__ void Peel1_v2(
-    GraphGpu const g,
-    auto* counter,
-    auto* survival,
-    auto* degree,
-    auto const* __restrict__ dying,
-    auto const* __restrict__ dying_count,
-    auto* next,
-    auto* cursor)
-{
-    val TID = blockDim.x * blockIdx.x + threadIdx.x;
-    val WID = TID >> 5;
-    val LID = TID & 0x1f;
-    val STRIDE = blockDim.x * gridDim.x;
-    val END = ((*dying_count + 31) >> 5) << 5;
-    uint32_t cnt = 0; // The decrease of the summation of degrees
-    for (var i = TID; i < END; i += STRIDE) {
-        var hit = 0xffff'ffffU;
-        if (i < *dying_count) {
-            val VID = dying[i];
-            // TODO: Could it lead to negative degrees?
-            if (atomicSub(degree + VID, 1) > 0) cnt += 1;
-            survival[VID] = 0;
-            for (var j = __ldg(g.rowoffset_ + VID), e = __ldg(g.rowoffset_ + VID + 1); j < e; ++j) {
-                val nghb = __ldg(g.colidx_[j]);
-                if (survival[nghb]) {
-                    val fd = atomicSub(degree + nghb, 1);
-                    if (fd > 0) cnt += 1;
-                    if (fd == 2) {
-                        hit = nghb;
-                    }
-                    else if (fd <= 1) {
-                        survival[nghb] = 0;
-                    }
-                    // TODO: Could it lead to negative degrees?
-                    if (fd < 0) printf("[GKP] NEGATIVE DEGREE!\n");
-                }
-            }
-        }
-        val writing = hit < 0xffff'ffffU;
-        var mask = __ballot_sync(0xffff'ffffU, writing);
-        val offset = __popc(mask & ((1U << LID) - 1));
-        uint32_t cur;
-        if (LID == 0) cur = atomicAdd(cursor, __popc(mask));
-        cur = __shfl_sync(0xffff'ffffU, cur, 0);
-        if (writing) next[cur + offset] = hit;
-    }
-    // TODO: Do it by a finalizing function, to avoid negative degrees.
-    cnt = Sum(cnt);
-    if (threadIdx.x == 0) atomicAdd(counter + 1, cnt);
-}
-
-__global__ void Sieve1_v3(
-    GraphGpu const g, auto* flag, auto const* __restrict__ degree, auto* next, auto* cursor)
-{
-    val TID = blockDim.x * blockIdx.x + threadIdx.x;
-    val LID = TID & 0x1f;
-    val STRIDE = blockDim.x * gridDim.x;
-    val END = ((g.num_vertices_ + 31) >> 5) << 5;
-    for (var i = TID; i < END; i += STRIDE) {
-        val deg = degree[i];
-        val hit = i < g.num_vertices_ && deg < 3;
-        uint32_t mask = __ballot_sync(0xffff'ffffU, hit);
-        uint32_t offset = __popc(mask & ((1U << LID) - 1));
-        flag[i] = (deg == 2) << 2 | (deg == 1) << 1 | 1;
-        uint32_t cur = LID == 0 ? atomicAdd(cursor, __popc(mask)) : 0U;
-        cur = __shfl_sync(0xffff'ffffU, cur, 0);
-        if (hit) next[cur + offset] = i;
-    }
-}
-
-__global__ void Sieve_v3(GraphGpu const g, auto* degree, auto* next, auto* cursor)
-{
-    val TID = blockDim.x * blockIdx.x + threadIdx.x;
-    val LID = TID & 0x1f;
-    val STRIDE = blockDim.x * gridDim.x;
-    val END = ((g.num_vertices_ + 31) >> 5) << 5;
-    for (var i = TID; i < END; i += STRIDE) {
-        val hit = i < g.num_vertices_ && degree[i] < 3;
-        val mask = __ballot_sync(0xffff'ffffU, hit);
-        val offset = __popc(mask & ((1U << LID) - 1));
-    }
-}
-
-__global__ void SieveD2(GraphGpu const g, auto* degree, auto* next, auto* cursor)
-{
-    val TID = blockDim.x * blockIdx.x + threadIdx.x;
-    val LID = TID & 0x1f;
-    val STRIDE = blockDim.x * gridDim.x;
-    val END = ((g.num_vertices_ + 31) >> 5) << 5;
-    for (var i = TID; i < END; i += STRIDE) {
-        val hit = i < g.num_vertices_ && degree[i] == 2;
-        val mask = __ballot_sync(0xffff'ffffU, hit);
-        val offset = __popc(mask & ((1U << LID) - 1));
-        uint32_t cur;
-        if (LID == 0) cur = atomicAdd(cursor, __popc(mask));
-        cur = __shfl_sync(0xffff'ffffU, cur, 0);
-        if (hit) next[cur + offset] = i;
-    }
-}
-
-__forceinline__ __device__ bool LockTriangle(auto* flag, uint32_t v1, uint32_t v2, uint32_t v3)
-{
-    if (v2 > v3) thrust::swap(v2, v3);
-    val e1 = flag[v1];
-    if ((e1 & 4) || atomicCAS(flag + v1, e1, e1 | 4U) != e1) return false;
-    val e2 = flag[v2];
-    if ((e2 & 4) || atomicCAS(flag + v2, e2, e2 | 4U) != e2) {
-        atomicAnd(flag + v1, ~4U);
-        return false;
-    }
-    val e3 = flag[v3];
-    if ((e3 & 4) || atomicCAS(flag + v3, e3, e3 | 4U) != e3) {
-        atomicAnd(flag + v1, ~4U);
-        atomicAnd(flag + v2, ~4U);
-        return false;
-    }
-    return true;
-}
-
-__forceinline__ __device__ bool NotTriangle(GraphGpu const& g, uint32_t nghb1, uint32_t nghb2)
-{
-    for (var i = g.rowoffset_[nghb1]; i < g.rowoffset_[nghb1 + 1]; ++i) {
-        if (nghb2 == g.colidx_[i]) return false;
-    }
-    return true;
-}
-
-__global__ void Peel2(
-    GraphGpu const g,
-    auto* counter,
-    auto* flag,
-    auto* degree,
-    auto const* dying,
-    auto const* dying_count,
-    auto* next,
-    auto* cursor)
-{
-#define INVALID_VID 0xffff'ffffU
-    val TID = blockDim.x * blockIdx.x + threadIdx.x;
-    val WID = TID >> 5;
-    val LID = TID & 0x1f;
-    val STRIDE = blockDim.x * gridDim.x;
-    val END = ((*dying_count + 31) >> 5) << 5;
-    // cnt2: The decrease of the summation of degrees caused by **removing MAXIMAL 2-cliques**.
-    // |Removed MAXIMAL 2-cliques| = cnt2 / 2
-    // cnt3: How many 3-cliques reduced.
-    uint32_t cnt2 = 0, cnt3 = 0;
-    // flag: 1 = survival, 2 = non-triangle, 4 = locked, 8 = with the smallest index among a
-    // triangle, 16 = in frontier The first time a vertex put into frontier: identify whether it
-    // forms a triangle, update flag, and put it into frontier again.
-    for (var i = TID; i < END; i += STRIDE) {
-        uint32_t nghb1 = INVALID_VID, nghb2 = INVALID_VID;
-        if (i < *dying_count) {
-            val VID = dying[i];
-            for (var j = g.rowoffset_[VID], e = g.rowoffset_[VID + 1]; j < e; ++j) {
-                var u = g.colidx_[j];
-                if (flag[u]) {
-                    nghb2 = nghb1;
-                    nghb1 = u;
-                }
-            }
-            if (flag[VID] == 29) { // 29 = 16 + 8 + 4 + 1
-                flag[VID] = 0;
-                // It **must** be of deg 2, for only vertices of degree 2 at most are put into
-                // frontier.
-                if (atomicSub(degree + VID, 2) == 2) {
-                    cnt3 += 1;
-                    if (nghb1 != INVALID_VID) {
-                        val fd = atomicSub(degree + nghb1, 1);
-                        if (fd != 2 && fd != 3) nghb1 = INVALID_VID;
-                    }
-                    if (nghb2 != INVALID_VID) {
-                        val fd = atomicSub(degree + nghb2, 1);
-                        if (fd != 2 && fd != 3) nghb2 = INVALID_VID;
-                    }
-                }
-            }
-            else if (flag[VID] & 4) {
-                // Do nothing
-                nghb1 = nghb2 = INVALID_VID;
-            }
-            else if (flag[VID] == 19) { // 19 = 16 + 2 + 1
-                flag[VID] = 0;
-                var fd = atomicSub(degree + VID, 2);
-                cnt2 += max(fd, 0);
-                if (nghb1 != INVALID_VID) {
-                    fd = atomicSub(degree + nghb1, 1);
-                    if (fd < 2) {
-                        degree[nghb1] = 0;
-                        flag[nghb1] = 0;
-                    }
-                    if (fd > 0) cnt2 += 1;
-                    if (fd != 3) nghb1 = INVALID_VID;
-                }
-                if (nghb2 != INVALID_VID) {
-                    fd = atomicSub(degree + nghb2, 1);
-                    if (fd < 2) {
-                        degree[nghb2] = 0;
-                        flag[nghb2] = 0;
-                    }
-                    if (fd > 0) cnt2 += 1;
-                    if (fd != 3) nghb2 = INVALID_VID;
-                }
-            }
-            else if (flag[VID] & 1) { // Let us find out whether d-2 vertex form a triangle or not.
-                if (degree[VID] < 0) {
-                    nghb1 = nghb2 = INVALID_VID;
-                    degree[VID] = 0;
-                    flag[VID] = 0;
-                }
-                else if (degree[VID] == 1) { // None of 2-cliques removed hereby is maximal clique.
-                    nghb1 = nghb2 = INVALID_VID;
-                    degree[VID] = 0;
-                    flag[VID] = 0;
-                    for (var j = g.rowoffset_[VID], e = g.rowoffset_[VID + 1]; j < e; ++j) {
-                        var u = g.colidx_[j];
-                        if (flag[u]) {
-                            val fd = atomicSub(degree + u, 1);
-                            if (fd == 2 || fd == 3) nghb1 = u;
-                        }
-                    }
-                }
-                else if (degree[VID] == 2) {
-                    if (nghb1 == INVALID_VID || nghb2 == INVALID_VID ||
-                        NotTriangle(g, nghb1, nghb2))
-                    {
-                        flag[VID] |= 2;
-                        nghb1 = VID;
-                        nghb2 = INVALID_VID;
-                    }
-                    else if (VID < nghb1 && VID < nghb2 && LockTriangle(flag, VID, nghb1, nghb2)) {
-                        flag[VID] |= 8;
-                        nghb1 = VID;
-                        nghb2 = INVALID_VID;
-                    }
-                    else {
-                        nghb1 = nghb2 = INVALID_VID;
-                    }
-                }
-            }
-            flag[VID] &= ~16U;
-        }
-        {
-            var writing = nghb1 < INVALID_VID && !(atomicOr(flag + nghb1, 16) & 16);
-            var mask = __ballot_sync(0xffff'ffffU, writing);
-            var off = __popc(mask & ((1U << LID) - 1));
-            uint32_t cur;
-            if (LID == 0) cur = atomicAdd(cursor, __popc(mask));
-            cur = __shfl_sync(0xffff'ffffU, cur, 0);
-            if (writing) next[cur + off] = nghb1;
-        }
-        {
-            var writing = nghb2 < INVALID_VID && !(atomicOr(flag + nghb2, 16) & 16);
-            var mask = __ballot_sync(0xffff'ffffU, writing);
-            var off = __popc(mask & ((1U << LID) - 1));
-            uint32_t cur;
-            if (LID == 0) cur = atomicAdd(cursor, __popc(mask));
-            cur = __shfl_sync(0xffff'ffffU, cur, 0);
-            if (writing) next[cur + off] = nghb2;
-        }
-    }
-    cnt2 = Sum(cnt2);
-    if (threadIdx.x == 0) atomicAdd(counter + 1, cnt2);
-    cnt3 = Sum(cnt3);
-    if (threadIdx.x == 0) atomicAdd(counter + 2, cnt3);
-#undef INVALID_VID
-}
 
 __global__ void FinalizePeeling(auto const vertex_count, auto* degree, auto* survival)
 {
@@ -946,7 +619,7 @@ __global__ void FinalizePeeling(auto const vertex_count, auto* degree, auto* sur
         }
         if (survival[i] != 0 && degree[i] == 0) {
             LOG("survival[", i, "] = ", survival[i], " && degree[", i, "] = 0");
-            degree[i] = 0;
+            survival[i] = 0;
         }
         if (survival[i] > 1) {
             LOG("survival[", i, "] = ", survival[i]);
@@ -1061,6 +734,8 @@ acc_t BkSolverWrapper(Graph& graph, size_t device_id)
     int32_t* offset_offset;
     auto d1 = gkp::Queue<uint32_t>::Generate(graph_gpu.num_vertices_);
     auto d2 = gkp::Queue<uint32_t>::Generate(graph_gpu.num_vertices_);
+    auto f1 = gkp::Queue<uint32_t>::Generate(graph_gpu.num_vertices_);
+    auto f2 = gkp::Queue<uint32_t>::Generate(graph_gpu.num_vertices_);
     cudaMalloc(&survival, graph_gpu.num_vertices_ * sizeof(uint32_t));
     cudaMalloc(&new_vid, graph_gpu.num_vertices_ * sizeof(uint32_t));
     cudaMalloc(&offset_offset, graph_gpu.num_vertices_ * sizeof(uint32_t));
@@ -1084,33 +759,16 @@ acc_t BkSolverWrapper(Graph& graph, size_t device_id)
 
     gkp::peelingFirstFilter<<<sm_num * BLOCK_PER_SM, 32 * WARP_PER_BLOCK>>>(
         graph_gpu, graph_gpu.degree_, d1, d2);
-    auto sd1 = d1.size();
-    auto sd2 = d2.size();
-    auto f1 = gkp::Queue<uint32_t>::Generate((sd1 + sd2) << 1);
-    auto tri = gkp::Queue<uint32_t>::Generate(sd2 << 1);
-    auto d3 = gkp::Queue<uint32_t>::Generate(sd2);
-    auto triangle = gkp::Queue<uint32_t>::Generate(sd2);
     cudaStream_t stream1, stream2;
-    cudaStreamCreate(&stream1);
-    cudaStreamCreate(&stream2);
-    auto const blockNum = std::min((sd1 + sd2) / 160 + 1UL, sm_num * BLOCK_PER_SM);
-    PRINT("sd1 = ", sd1, " sd2 = ", sd2, " blockNum = ", blockNum);
+    cudaStreamCreateWithFlags(&stream1, cudaStreamNonBlocking);
+    cudaStreamCreateWithFlags(&stream2, cudaStreamNonBlocking);
+    auto const blockNum = sm_num * BLOCK_PER_SM;
     while (true) {
-        gkp::peelingLeaf<<<blockNum, 32 * WARP_PER_BLOCK, 0, stream1>>>(
-            graph_gpu, graph_gpu.degree_, survival, d1, counter, tri);
-        gkp::peelingBridge<<<blockNum, 32 * WARP_PER_BLOCK, 0, stream2>>>(
-            graph_gpu, graph_gpu.degree_, survival, d2, tri, tri, counter + 1);
+        gkp::peelLeaf<<<blockNum, 32 * WARP_PER_BLOCK, 0, stream1>>>(
+            graph_gpu, graph_gpu.degree_, survival, d1, f1, f2, counter);
+        gkp::peelBridge<<<blockNum, 32 * WARP_PER_BLOCK, 0, stream2>>>(
+            graph_gpu, graph_gpu.degree_, survival, d2, f1, f2, counter + 1, counter + 2);
         cudaDeviceSynchronize();
-        d1.clear();
-        d2.clear();
-        gkp::peelingTriangle<<<blockNum, 32 * WARP_PER_BLOCK, 0, stream2>>>(
-            graph_gpu, graph_gpu.degree_, survival, tri, counter + 2);
-        gkp::peelingFilter<<<blockNum, 32 * WARP_PER_BLOCK, 0, stream1>>>(
-            graph_gpu, graph_gpu.degree_, survival, f1, d1, d2);
-        cudaDeviceSynchronize();
-        tri.clear();
-        f1.clear();
-        LOG("d1.size = ", d1.size(), " d2.size = ", d2.size());
         ++peeling_round;
         cudaMemcpy(counter_h + 4, counter, 4 * sizeof(uint32_t), cudaMemcpyDeviceToHost);
         PRINT(
@@ -1120,8 +778,12 @@ acc_t BkSolverWrapper(Graph& graph, size_t device_id)
             counter_h[0] == counter_h[4])
             break;
         memcpy(counter_h, counter_h + 4, 4 * sizeof(uint32_t));
+        std::swap(f1, d1);
+        std::swap(f2, d2);
+        f1.clear();
+        f2.clear();
     }
-    gkp::Queue<uint32_t>::Free(tri);
+    gkp::Queue<uint32_t>::Free(f2);
     gkp::Queue<uint32_t>::Free(f1);
     gkp::Queue<uint32_t>::Free(d2);
     gkp::Queue<uint32_t>::Free(d1);
@@ -1168,7 +830,7 @@ acc_t BkSolverWrapper(Graph& graph, size_t device_id)
     // BkpbKernel<<<1, 32>>>(graph_gpu, context_gpu);
 
     CUDA_CHECK(cudaDeviceSynchronize());
-    auto mc_num = context_gpu.GetMcNum() + counter_h[4] / 2 + counter_h[5] / 2 + counter_h[6];
+    auto mc_num = context_gpu.GetMcNum() + (counter_h[4] + counter_h[5]) / 2 + counter_h[6];
     // free memory
     graph_gpu.Free();
     // context_gpu.bitmaps_.Free();

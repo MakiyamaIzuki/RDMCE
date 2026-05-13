@@ -14,6 +14,7 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdlib>
+#include <thrust/swap.h>
 #include <type_traits>
 
 namespace gkp
@@ -28,7 +29,7 @@ __global__ void peelingFirstFilter(
 {
     val tid = blockDim.x * blockIdx.x + threadIdx.x;
     val stride = blockDim.x * gridDim.x;
-    val end = ((g.num_vertices_ + 31) >> 5) << 5;
+    val end = (g.num_vertices_ + 31) & ~31ULL;
     for (var i = tid; i < end; i += stride) {
         d1.addWarpwise(i, i < g.num_vertices_ && degree[i] == 1);
         d2.addWarpwise(i, i < g.num_vertices_ && degree[i] == 2);
@@ -36,143 +37,118 @@ __global__ void peelingFirstFilter(
 }
 
 template <typename Vid>
-__global__ void peelingFilter(
-    GraphGpu const g,
-    auto* degree,
-    auto* tag,
-    Queue<Vid> const frontier,
-    Queue<Vid> d1,
-    Queue<Vid> d2)
-{
-    val tid = blockDim.x * blockIdx.x + threadIdx.x;
-    val stride = blockDim.x * gridDim.x;
-    val end = (frontier.size() + 31) & ~31ULL;
-    if (tid == 0) LOG("");
-    for (var i = tid; i < end; i += stride) {
-        val v = i < frontier.size() ? frontier[i] : 0;
-        if (i < frontier.size() && tag[v]) {
-            val d = degree[v];
-            if (d < 0) degree[v] = 0;
-            if (d <= 0) tag[v] = 0;
-            d1.addWarpwise(v, d == 1 && atomicCAS(tag + v, 1, 3) == 1);
-            d2.addWarpwise(v, d == 2 && atomicCAS(tag + v, 1, 3) == 1);
-        }
-        else {
-            d1.addWarpwise(v, false);
-            d2.addWarpwise(v, false);
-        }
-    }
-}
-
-template <typename Vid>
-__global__ void peelingLeaf(
+__global__ void peelLeaf(
     GraphGpu const g,
     auto* degree,
     auto* survival,
     Queue<Vid> const d1,
-    uint32_t* count,
-    Queue<Vid> next)
-{
-    val tid = blockDim.x * blockIdx.x + threadIdx.x;
-    val stride = blockDim.x * gridDim.x;
-    val end = (d1.size() + 31) & ~31ULL;
-    if (tid == 0) LOG("");
-    uint32_t cnt = 0;
-    for (var i = tid; i < end; i += stride) {
-        var affected = INVALID_VID;
-        if (val v = i < d1.size() ? d1[i] : 0; i < d1.size() && survival[v]) {
-            survival[v] = 0;
-            val t = atomicExch(degree + v, 0);
-            if (t == 1) {
-                ++cnt;
-                for (var j = g.rowoffset_[v]; j < g.rowoffset_[v + 1]; ++j) {
-                    if (val u = g.colidx_[j]; survival[u]) {
-                        val t = atomicSub(degree + u, 1);
-                        cnt += t > 0 ? 1 : 0;
-                        switch (t) {
-                        case 1:
-                            survival[u] = 0;
-                            break;
-                        case 2:
-                        case 3:
-                            affected = u;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        next.addWarpwise(affected, affected != INVALID_VID);
-    }
-    cnt = sumBlockwise(cnt);
-    if (threadIdx.x == 0) atomicAdd(count, cnt);
-}
-
-template <typename Vid>
-__global__ void peelingTriangle(
-    GraphGpu const g, auto* degree, auto* survival, Queue<Vid> const tri, uint32_t* count)
-{
-    val tid = blockDim.x * blockIdx.x + threadIdx.x;
-    val stride = blockDim.x * gridDim.x;
-    uint32_t cnt = 0;
-    if (tid == 0) LOG("");
-    for (var i = tid; i < tri.size(); i += stride) {
-        uint32_t nghb1 = INVALID_VID, nghb2 = INVALID_VID;
-        if (i < tri.size()) {
-            val v = tri[i];
-            for (var j = g.rowoffset_[v]; j < g.rowoffset_[v + 1]; ++j) {
-                if (val u = g.colidx_[j]; degree[u] == 2) {
-                    nghb2 = nghb1;
-                    nghb1 = u;
-                }
-            }
-
-            if (v > nghb1 && v > nghb2) {
-                var t = atomicExch(degree + v, 0);
-                if (t != 2) {
-                    LOG("Vertex ", v, " in tri turns out to be not degree 2. v = ", v,
-                        " degree[v]: ", t, " -> ", t - 2, " n_1 = ", nghb1, " n_2 = ", nghb2);
-                    assert(0);
-                }
-                if (atomicExch(degree + nghb1, 0) != 2) {
-                    LOG("Vertex ", nghb1, " (N of ", v, ") is not of degree 2.");
-                    assert(0);
-                }
-                if (atomicExch(degree + nghb2, 0) != 2) {
-                    LOG("Vertex ", nghb2, " (N of ", v, ") is not of degree 2.");
-                    assert(0);
-                }
-                ++cnt;
-                survival[v] = 0;
-                degree[nghb1] = degree[nghb2] = 0;
-                survival[nghb1] = survival[nghb2] = 0;
-            }
-        }
-    }
-    cnt = sumBlockwise(cnt);
-    if (threadIdx.x == 0) atomicAdd(count, cnt);
-}
-
-template <typename Vid>
-__global__ void peelingBridge(
-    GraphGpu const g,
-    auto* degree,
-    auto* survival,
-    Queue<Vid> const d2,
-    Queue<Vid> next,
-    Queue<Vid> tri,
+    Queue<Vid> nd1,
+    Queue<Vid> nd2,
     uint32_t* count)
 {
     val tid = blockDim.x * blockIdx.x + threadIdx.x;
     val stride = blockDim.x * gridDim.x;
-    val end = (d2.size() + 31) & ~31ULL;
+    val size = d1.size();
+    val end = (size + 31) & ~31ULL;
     if (tid == 0) LOG("");
     uint32_t cnt = 0;
     for (var i = tid; i < end; i += stride) {
+        int32_t t = -1;
+        var u = INVALID_VID;
+        if (val v = i < size ? d1[i] : 0; i < size && survival[v]) {
+            survival[v] = 0;
+            if (atomicExch(degree + v, 0) == 1) {
+                ++cnt;
+                for (var j = g.rowoffset_[v]; j < g.rowoffset_[v + 1]; ++j) {
+                    if (u = g.colidx_[j]; survival[u]) {
+                        t = atomicSub(degree + u, 1);
+                        cnt += t > 0 ? 1 : 0;
+                        if (t == 1) survival[u] = 0;
+                    }
+                }
+            }
+        }
+        nd1.addWarpwise(u, t == 2);
+        nd2.addWarpwise(u, t == 3);
+    }
+    cnt = sumBlockwise(cnt);
+    if (threadIdx.x == 0) atomicAdd(count, cnt);
+}
+
+__forceinline__ __device__ void peelIsolatedTriangle(
+    auto* degree, auto* survival, auto a, auto b, auto c, auto& cnt)
+{
+    if (atomicCAS(degree + a, 2, -1) != 2) return;
+    if (atomicCAS(degree + b, 2, -1) != 2) {
+        atomicExch(degree + a, 2);
+        // LOG("Restore... ", c, " ", b, " ", a);
+        return;
+    }
+    if (atomicCAS(degree + c, 2, -1) != 2) {
+        atomicExch(degree + b, 2);
+        atomicExch(degree + a, 2);
+        // LOG("Restore... ", c, " ", b, " ", a);
+        return;
+    }
+    // LOG(a, " ", b, " ", c);
+    ++cnt;
+    degree[a] = degree[b] = degree[c] = 0;
+    survival[a] = survival[b] = survival[c] = 0;
+}
+
+__forceinline__ __device__ void peelAttachedTriangle(
+    auto* degree, auto* survival, auto n1, auto n2, auto c, auto& cnt, auto& od1, auto& od2)
+{
+    if ((od1 = atomicSub(degree + n1, 1)) < 3) {
+        atomicAdd(degree + n1, 1);
+        od1 = -1;
+        LOG("Restore... ", c, " ", n2, " ", n1);
+        return;
+    }
+    if ((od2 = atomicSub(degree + n2, 1)) < 3) {
+        atomicAdd(degree + n2, 1);
+        atomicAdd(degree + n1, 1);
+        od2 = -1;
+        od1 = -1;
+        // LOG("Restore... ", c, " ", n2, " ", n1);
+        return;
+    }
+    if (atomicCAS(degree + c, 2, 0) != 2) {
+        atomicAdd(degree + n2, 1);
+        atomicAdd(degree + n1, 1);
+        od2 = -1;
+        od1 = -1;
+        // LOG("Restore... ", c, " ", n2, " ", n1);
+        return;
+    }
+    // LOG(a, " ", b, " ", c);
+    // LOG("d(v_a) = ", degree[a], " d(v_b) = ", degree[b]);
+    ++cnt;
+    survival[c] = 0;
+}
+
+template <typename Vid>
+__global__ void peelBridge(
+    GraphGpu const g,
+    auto* degree,
+    auto* survival,
+    Queue<Vid> const d2,
+    Queue<Vid> next1,
+    Queue<Vid> next2,
+    uint32_t* count2,
+    uint32_t* count3)
+{
+    val tid = blockDim.x * blockIdx.x + threadIdx.x;
+    val stride = blockDim.x * gridDim.x;
+    val size = d2.size();
+    val end = (size + 31) & ~31ULL;
+    if (tid == 0) LOG("");
+    uint32_t cnt2 = 0U, cnt3 = 0U;
+    for (var i = tid; i < end; i += stride) {
         uint32_t nghb1 = INVALID_VID, nghb2 = INVALID_VID;
         bool isTriangle = false;
-        val v = i < d2.size() ? d2[i] : 0;
-        if (i < d2.size() && survival[v]) {
+        int32_t od1 = -1, od2 = -1;
+        if (val v = i < size ? d2[i] : 0; i < size && survival[v]) {
             for (var j = g.rowoffset_[v]; j < g.rowoffset_[v + 1]; ++j) {
                 if (val u = g.colidx_[j]; survival[u]) {
                     nghb2 = nghb1;
@@ -180,47 +156,53 @@ __global__ void peelingBridge(
                 }
             }
             if (nghb1 == INVALID_VID) {
+                // No alive neighbor is found; counting is done by other threads.
                 survival[v] = 0;
                 degree[v] = 0;
-                LOG("Vertex ", v, " in d2 has no neighbor.");
             }
             else {
                 for (var j = g.rowoffset_[nghb1]; j < g.rowoffset_[nghb1 + 1]; ++j) {
                     if (g.colidx_[j] == nghb2) {
                         isTriangle = true;
-                        nghb1 = nghb2 = INVALID_VID;
                         break;
                     }
                 }
 
-                if (!isTriangle) {
-                    int32_t t;
+                if (isTriangle) {
+                    if (v < nghb1 && v < nghb2 && degree[nghb1] == 2 && degree[nghb2] == 2)
+                        peelIsolatedTriangle(degree, survival, nghb1, nghb2, v, cnt3);
+                    if (degree[nghb1] > 2 && degree[nghb2] > 2)
+                        peelAttachedTriangle(degree, survival, nghb1, nghb2, v, cnt3, od1, od2);
+                }
+                else {
                     survival[v] = 0;
-                    // `t` can be negative, for a cascaded vertex may be added into frontier queue
-                    // more than one times.
-                    t = atomicExch(degree + v, 0);
-                    cnt += max(t, 0);
+                    val t = atomicExch(degree + v, 0);
+                    if (t < 0) LOG("t = ", t);
+                    cnt2 += max(t, 0);
                     if (nghb1 != INVALID_VID && survival[nghb1]) {
-                        t = atomicSub(degree + nghb1, 1);
-                        if (t > 0) ++cnt;
-                        if (t <= 1) survival[nghb1] = 0;
-                        if (t != 2 && t != 3) nghb1 = INVALID_VID;
+                        od1 = atomicSub(degree + nghb1, 1);
+                        if (od1 > 0) ++cnt2;
+                        if (od1 <= 1) survival[nghb1] = 0;
                     }
                     if (nghb2 != INVALID_VID && survival[nghb2]) {
-                        t = atomicSub(degree + nghb2, 1);
-                        if (t > 0) ++cnt;
-                        if (t <= 1) survival[nghb2] = 0;
-                        if (t != 2 && t != 3) nghb2 = INVALID_VID;
+                        od2 = atomicSub(degree + nghb2, 1);
+                        if (od2 > 0) ++cnt2;
+                        if (od2 <= 1) survival[nghb2] = 0;
                     }
                 }
             }
         }
-        tri.addWarpwise(v, isTriangle);
-        next.addWarpwise(nghb1, nghb1 != INVALID_VID);
-        next.addWarpwise(nghb2, nghb2 != INVALID_VID);
+        next1.addWarpwise(nghb1, od1 == 2);
+        next2.addWarpwise(nghb1, od1 == 3);
+        next1.addWarpwise(nghb2, od2 == 2);
+        next2.addWarpwise(nghb2, od2 == 3);
     }
-    cnt = sumBlockwise(cnt);
-    if (threadIdx.x == 0) atomicAdd(count, cnt);
+    cnt2 = sumBlockwise(cnt2);
+    cnt3 = sumBlockwise(cnt3);
+    if (threadIdx.x == 0) {
+        atomicAdd(count2, cnt2);
+        atomicAdd(count3, cnt3);
+    }
 }
 
 #undef var
