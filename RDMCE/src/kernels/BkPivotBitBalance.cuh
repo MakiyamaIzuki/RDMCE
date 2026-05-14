@@ -774,10 +774,11 @@ acc_t BkSolverWrapper(Graph& graph, size_t device_id)
         PRINT(
             "peeling_round = ", peeling_round, "\n\tcounter_h[4] = ", counter_h[4],
             " counter_h[5] = ", counter_h[5], " counter_h[6] = ", counter_h[6]);
-        if (counter_h[2] == counter_h[6] && counter_h[1] == counter_h[5] &&
-            counter_h[0] == counter_h[4])
-            break;
+        // if (counter_h[2] == counter_h[6] && counter_h[1] == counter_h[5] &&
+        //     counter_h[0] == counter_h[4])
+        //    break;
         memcpy(counter_h, counter_h + 4, 4 * sizeof(uint32_t));
+        break;
         std::swap(f1, d1);
         std::swap(f2, d2);
         f1.clear();

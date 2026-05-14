@@ -78,6 +78,7 @@ __global__ void peelLeaf(
 __forceinline__ __device__ void peelIsolatedTriangle(
     auto* degree, auto* survival, auto a, auto b, auto c, auto& cnt)
 {
+    if (a > b) thrust::swap(a, b);
     if (atomicCAS(degree + a, 2, -1) != 2) return;
     if (atomicCAS(degree + b, 2, -1) != 2) {
         atomicExch(degree + a, 2);
@@ -96,36 +97,55 @@ __forceinline__ __device__ void peelIsolatedTriangle(
     survival[a] = survival[b] = survival[c] = 0;
 }
 
-__forceinline__ __device__ void peelAttachedTriangle(
-    auto* degree, auto* survival, auto n1, auto n2, auto c, auto& cnt, auto& od1, auto& od2)
-{
-    if ((od1 = atomicSub(degree + n1, 1)) < 3) {
-        atomicAdd(degree + n1, 1);
-        od1 = -1;
-        LOG("Restore... ", c, " ", n2, " ", n1);
-        return;
-    }
-    if ((od2 = atomicSub(degree + n2, 1)) < 3) {
-        atomicAdd(degree + n2, 1);
-        atomicAdd(degree + n1, 1);
-        od2 = -1;
-        od1 = -1;
-        // LOG("Restore... ", c, " ", n2, " ", n1);
-        return;
-    }
-    if (atomicCAS(degree + c, 2, 0) != 2) {
-        atomicAdd(degree + n2, 1);
-        atomicAdd(degree + n1, 1);
-        od2 = -1;
-        od1 = -1;
-        // LOG("Restore... ", c, " ", n2, " ", n1);
-        return;
-    }
-    // LOG(a, " ", b, " ", c);
-    // LOG("d(v_a) = ", degree[a], " d(v_b) = ", degree[b]);
-    ++cnt;
-    survival[c] = 0;
-}
+// __forceinline__ __device__ bool bfind(auto* degree, auto left, auto right, auto arr, auto target)
+// {
+//     while (right - left > 1) {
+//         auto mid = (left + right) >> 1;
+//         if (arr[mid] == target) return true;
+//         if (arr[mid] > target)
+//             right = mid;
+//         else
+//             left = mid;
+//     }
+//     return false;
+// }
+// 
+// __forceinline__ __device__ void peelAttachedTriangle(
+//     GraphGpu const& g,
+//     auto* degree,
+//     auto* survival,
+//     auto n1,
+//     auto n2,
+//     auto c,
+//     auto& cnt,
+//     auto& od1,
+//     auto& od2)
+// {
+//     if (g.rowoffset_[n1 + 1] - g.rowoffset_[n1] > g.rowoffset_[n2 + 1] - g.rowoffset_[n2])
+//         thrust::swap(n1, n2);
+//     if (!bfind(g.rowoffset_[n1], g.rowoffset_[n1 + 1], g.colidx_, n2)) return;
+//     if ((od1 = atomicSub(degree + n1, 1)) < 3) {
+//         atomicAdd(degree + n1, 1);
+//         od1 = -1;
+//         return;
+//     }
+//     if ((od2 = atomicSub(degree + n2, 1)) < 3) {
+//         atomicAdd(degree + n2, 1);
+//         atomicAdd(degree + n1, 1);
+//         od2 = -1;
+//         od1 = -1;
+//         return;
+//     }
+//     if (atomicCAS(degree + c, 2, 0) != 2) {
+//         atomicAdd(degree + n2, 1);
+//         atomicAdd(degree + n1, 1);
+//         od2 = -1;
+//         od1 = -1;
+//         return;
+//     }
+//     ++cnt;
+//     survival[c] = 0;
+// }
 
 template <typename Vid>
 __global__ void peelBridge(
@@ -169,10 +189,10 @@ __global__ void peelBridge(
                 }
 
                 if (isTriangle) {
-                    if (v < nghb1 && v < nghb2 && degree[nghb1] == 2 && degree[nghb2] == 2)
-                        peelIsolatedTriangle(degree, survival, nghb1, nghb2, v, cnt3);
-                    if (degree[nghb1] > 2 && degree[nghb2] > 2)
-                        peelAttachedTriangle(degree, survival, nghb1, nghb2, v, cnt3, od1, od2);
+                    // if (v < nghb1 && v < nghb2 && degree[nghb1] == 2 && degree[nghb2] == 2)
+                    //     peelIsolatedTriangle(degree, survival, nghb1, nghb2, v, cnt3);
+                    // if (degree[nghb1] > 2 && degree[nghb2] > 2)
+                    //     peelAttachedTriangle(g, degree, survival, nghb1, nghb2, v, cnt3, od1, od2);
                 }
                 else {
                     survival[v] = 0;
