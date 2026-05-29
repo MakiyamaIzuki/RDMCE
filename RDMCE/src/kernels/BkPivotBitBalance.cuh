@@ -653,7 +653,7 @@ __global__ void Rebuild(
             for (auto j = rowoffset_[i]; j < end; j += 32) {
                 auto k = j + LID;
                 auto u = k < end ? colidx_[k] : 0;
-                auto active = k < end && survival[u];
+                auto active = k < end && u != 0xffff'ffffU && survival[u];
                 auto nvid = active ? new_vid[u] : 0;
                 auto mask = __ballot_sync(0xffff'ffff, active);
                 auto pos = __popc(mask & ((1U << LID) - 1));
@@ -769,6 +769,7 @@ acc_t BkSolverWrapper(Graph& graph, size_t device_id)
         gkp::peelBridge<<<blockNum, 32 * WARP_PER_BLOCK, 0, stream2>>>(
             graph_gpu, graph_gpu.degree_, survival, d2, f1, f2, counter + 1, counter + 2);
         cudaDeviceSynchronize();
+        gkp::peelNonTriangleEdge<<<blockNum, 32 * WARP_PER_BLOCK>>>(graph_gpu, graph_gpu.degree_, counter);
         ++peeling_round;
         cudaMemcpy(counter_h + 4, counter, 4 * sizeof(uint32_t), cudaMemcpyDeviceToHost);
         PRINT(

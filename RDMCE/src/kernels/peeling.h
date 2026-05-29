@@ -23,6 +23,37 @@ namespace gkp
 #define val auto const
 #define var auto
 
+__global__ void peelNonTriangleEdge(GraphGpu const g, auto* degree, auto* counter)
+{
+    val tid = blockDim.x * blockIdx.x + threadIdx.x;
+    val wid = tid >> 5;
+    val lid = tid & 0x1f;
+    val stride = blockDim.x * gridDim.x;
+    val end = (g.num_vertices_ + 31) & ~31ULL;
+    for (var i = wid; i < end; i += stride) {
+        if (i >= g.num_vertices_ || degree[i] < 2) continue;
+        for (var j = g.rowoffset_[i]; j < g.rowoffset_[i + 1]; ++j) {
+            val u = g.colidx_[j];
+            bool tri = false;
+            if (val t = g.rowoffset_[u] + lid; t < g.rowoffset_[u + 1]) {
+                val w = g.colidx_[t];
+                for (var j = g.rowoffset_[i]; j < g.rowoffset_[i + 1]; ++j) {
+                    if (w == g.colidx_[j]) {
+                        tri = true;
+                    }
+                }
+            }
+            tri = __ballot_sync(0xffff'ffffU, tri);
+            if (lid == 0 && !tri) {
+                LOG(i, " ", u);
+                g.colidx_[j] = INVALID_VID;
+                degree[i] -= 1;
+                atomicAdd(counter, 2);
+            }
+        }
+    }
+}
+
 template <typename Vid>
 __global__ void peelingFirstFilter(
     GraphGpu const g, auto const* __restrict__ degree, Queue<Vid> d1, Queue<Vid> d2)
@@ -97,7 +128,8 @@ __forceinline__ __device__ void peelIsolatedTriangle(
     survival[a] = survival[b] = survival[c] = 0;
 }
 
-// __forceinline__ __device__ bool bfind(auto* degree, auto left, auto right, auto arr, auto target)
+// __forceinline__ __device__ bool bfind(auto* degree, auto left, auto right, auto arr, auto
+// target)
 // {
 //     while (right - left > 1) {
 //         auto mid = (left + right) >> 1;
@@ -109,7 +141,7 @@ __forceinline__ __device__ void peelIsolatedTriangle(
 //     }
 //     return false;
 // }
-// 
+//
 // __forceinline__ __device__ void peelAttachedTriangle(
 //     GraphGpu const& g,
 //     auto* degree,
@@ -192,7 +224,8 @@ __global__ void peelBridge(
                     // if (v < nghb1 && v < nghb2 && degree[nghb1] == 2 && degree[nghb2] == 2)
                     //     peelIsolatedTriangle(degree, survival, nghb1, nghb2, v, cnt3);
                     // if (degree[nghb1] > 2 && degree[nghb2] > 2)
-                    //     peelAttachedTriangle(g, degree, survival, nghb1, nghb2, v, cnt3, od1, od2);
+                    //     peelAttachedTriangle(g, degree, survival, nghb1, nghb2, v, cnt3, od1,
+                    //     od2);
                 }
                 else {
                     survival[v] = 0;
