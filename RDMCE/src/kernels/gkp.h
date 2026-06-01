@@ -136,6 +136,18 @@ __device__ __forceinline__ auto get_lane_id()
     return ret;
 }
 
+template <typename Addable>
+    requires((std::integral<Addable> || std::floating_point<Addable>) && sizeof(Addable) >= 4)
+__forceinline__ __device__ Addable sumWarpwise(Addable a)
+{
+    a += __shfl_down_sync(0xffff'ffffU, a, 1);
+    a += __shfl_down_sync(0xffff'ffffU, a, 2);
+    a += __shfl_down_sync(0xffff'ffffU, a, 4);
+    a += __shfl_down_sync(0xffff'ffffU, a, 8);
+    a += __shfl_down_sync(0xffff'ffffU, a, 16);
+    return a;
+}
+
 // The number of threads per block should be not greater than 1024, and be a multiple of 32.
 // Only threads with threadIdx.x < 32 can obtain the summation.
 template <typename Addable>

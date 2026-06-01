@@ -22,6 +22,86 @@ namespace gkp
 #define val auto const
 #define var auto
 
+struct PGThreshold
+{
+    static constexpr int32_t alpha = 32;
+    static constexpr int32_t beta = 1024;
+};
+
+__global__ void pt(
+    GraphGpu const g,
+    auto const* __restrict__ degree_in,
+    auto* __restrict__ degree_out,
+    auto* __restrict__ survival)
+{
+    val tid = blockDim.x * blockIdx.x + threadIdx.x;
+    val stride = blockDim.x * gridDim.x;
+    for (var i = tid; i < g.num_vertices_; i += stride) {
+        if (degree_in[i] > 1 && degree_in[i] < PGThreshold::alpha) {
+            int32_t diff = 0;
+            for (var j = g.rowoffset_[i]; j < g.rowoffset_[i + 1]; ++j) {
+                val n = g.colidx_[j];
+                if (degree_in[n] == 1) {
+                    diff += 1;
+                    survival[n] = 0;
+                }
+            }
+            degree_out[i] = degree_in[i] - diff;
+        }
+    }
+//    __syncthreads();
+}
+
+__global__ void pw(
+    GraphGpu const g,
+    auto const* __restrict__ degree_in,
+    auto* __restrict__ degree_out,
+    auto* __restrict__ survival)
+{
+    val wid = (blockDim.x * blockIdx.x + threadIdx.x) >> 5;
+    val lid = threadIdx.x & 0x1f;
+    val stride = blockDim.x * gridDim.x >> 5;
+    for (var i = wid; i < g.num_vertices_; i += stride) {
+        if (degree_in[i] >= PGThreshold::alpha && degree_in[i] < PGThreshold::beta) {
+            int32_t diff = 0;
+            for (var j = g.rowoffset_[i] + lid; j < g.rowoffset_[i + 1]; j += 32) {
+                val n = g.colidx_[j];
+                if (degree_in[n] == 1) {
+                    diff += 1;
+                    survival[n] = 0;
+                }
+            }
+            diff = sumWarpwise(diff);
+            if (lid == 0) degree_out[i] = degree_in[i] - diff;
+        }
+    }
+}
+
+__global__ void pb(
+    GraphGpu const g,
+    auto const* __restrict__ degree_in,
+    auto* __restrict__ degree_out,
+    auto* __restrict__ survival)
+{
+    val tid = blockDim.x * blockIdx.x + threadIdx.x;
+    val stride = blockDim.x * gridDim.x;
+    val end = g.num_vertices_ / 2;
+    for (var i = g.num_vertices_ - 1; i >= end; --i) {
+        if (degree_in[i] >= PGThreshold::beta) {
+            int32_t diff = 0;
+            for (var j = g.rowoffset_[i] + tid; j < g.rowoffset_[i + 1]; j += stride) {
+                val n = g.colidx_[j];
+                if (degree_in[n] == 1) {
+                    diff += 1;
+                    survival[n] = 0;
+                }
+            }
+            diff = sumBlockwise(diff);
+            if (threadIdx.x == 0) degree_out[i] = degree_in[i] - diff;
+        }
+    }
+}
+
 template <typename Vid>
 __global__ void peelingFirstFilter(
     GraphGpu const g, auto const* __restrict__ degree, Queue<Vid> d1, Queue<Vid> d2)
