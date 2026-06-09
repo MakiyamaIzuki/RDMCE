@@ -1058,17 +1058,19 @@ acc_t BkSolverWrapper(Graph& graph, size_t device_id)
     uint32_t* counter;
     uint32_t counter_h[8] { 0 };
     uint32_t* new_vid;
-    int32_t* offset_offset;
-    auto d1 = gkp::Queue<uint32_t>::Generate(graph_gpu.num_vertices_);
-    auto d2 = gkp::Queue<uint32_t>::Generate(graph_gpu.num_vertices_);
+    int64_t* offset_offset;
+    int64_t* new_degree;
     cudaMalloc(&survival, graph_gpu.num_vertices_ * sizeof(uint32_t));
     cudaMalloc(&new_vid, graph_gpu.num_vertices_ * sizeof(uint32_t));
-    cudaMalloc(&offset_offset, graph_gpu.num_vertices_ * sizeof(uint32_t));
+    cudaMalloc(&offset_offset, graph_gpu.num_vertices_ * sizeof(*offset_offset));
+    cudaMalloc(&new_degree, graph_gpu.num_vertices_ * sizeof(*new_degree));
     cudaMalloc(&counter, 8 * sizeof(uint32_t));
     cudaMemset(survival, 0, graph_gpu.num_vertices_ * sizeof(uint32_t));
     cudaMemset(new_vid, 0, graph_gpu.num_vertices_ * sizeof(uint32_t));
-    cudaMemset(offset_offset, 0, graph_gpu.num_vertices_ * sizeof(uint32_t));
+    cudaMemset(offset_offset, 0, graph_gpu.num_vertices_ * sizeof(*offset_offset));
+    cudaMemset(new_degree, 0, graph_gpu.num_vertices_ * sizeof(*new_degree));
     cudaMemset(counter, 0, 8 * sizeof(uint32_t));
+    CUDA_CHECK(cudaDeviceSynchronize());
 
     {
         std::vector<int32_t> temp(graph_gpu.num_vertices_, 1);
@@ -1078,62 +1080,32 @@ acc_t BkSolverWrapper(Graph& graph, size_t device_id)
     }
     void* temp_storage = nullptr;
     size_t temp_storage_size = 0;
-    int peeling_round = 0;
-    cudaDeviceSetLimit(
-        cudaLimitPrintfFifoSize, 10 * 1024 * 1024); // TODO: Remove this upon releasing
 
-    gkp::peelingFirstFilter<<<sm_num * BLOCK_PER_SM, 32 * WARP_PER_BLOCK>>>(
-        graph_gpu, graph_gpu.degree_, d1, d2);
-    auto sd1 = d1.size();
-    auto sd2 = d2.size();
-    auto f1 = gkp::Queue<uint32_t>::Generate((sd1 + sd2) << 1);
-    auto tri = gkp::Queue<uint32_t>::Generate(sd2 << 1);
-    auto d3 = gkp::Queue<uint32_t>::Generate(sd2);
-    auto triangle = gkp::Queue<uint32_t>::Generate(sd2);
-    cudaStream_t stream1, stream2;
-    cudaStreamCreate(&stream1);
-    cudaStreamCreate(&stream2);
-    auto const blockNum = std::min((sd1 + sd2) / 160 + 1UL, sm_num * BLOCK_PER_SM);
-    PRINT("sd1 = ", sd1, " sd2 = ", sd2, " blockNum = ", blockNum);
-    while (true) {
-        gkp::peelingLeaf<<<blockNum, 32 * WARP_PER_BLOCK, 0, stream1>>>(
-            graph_gpu, graph_gpu.degree_, survival, d1, counter, tri);
-        gkp::peelingBridge<<<blockNum, 32 * WARP_PER_BLOCK, 0, stream2>>>(
-            graph_gpu, graph_gpu.degree_, survival, d2, tri, tri, counter + 1);
-        cudaDeviceSynchronize();
-        d1.clear();
-        d2.clear();
-        gkp::peelingTriangle<<<blockNum, 32 * WARP_PER_BLOCK, 0, stream2>>>(
-            graph_gpu, graph_gpu.degree_, survival, tri, counter + 2);
-        gkp::peelingFilter<<<blockNum, 32 * WARP_PER_BLOCK, 0, stream1>>>(
-            graph_gpu, graph_gpu.degree_, survival, f1, d1, d2);
-        cudaDeviceSynchronize();
-        tri.clear();
-        f1.clear();
-        LOG("d1.size = ", d1.size(), " d2.size = ", d2.size());
-        ++peeling_round;
-        cudaMemcpy(counter_h + 4, counter, 4 * sizeof(uint32_t), cudaMemcpyDeviceToHost);
-        PRINT(
-            "peeling_round = ", peeling_round, "\n\tcounter_h[4] = ", counter_h[4],
-            " counter_h[5] = ", counter_h[5], " counter_h[6] = ", counter_h[6]);
-        if (counter_h[2] == counter_h[6] && counter_h[1] == counter_h[5] &&
-            counter_h[0] == counter_h[4])
-            break;
-        memcpy(counter_h, counter_h + 4, 4 * sizeof(uint32_t));
+    cudaStream_t streams[3];
+    for (int i = 0; i < 3; ++i) {
+        cudaStreamCreateWithFlags(streams + i, cudaStreamNonBlocking);
     }
-    gkp::Queue<uint32_t>::Free(tri);
-    gkp::Queue<uint32_t>::Free(f1);
-    gkp::Queue<uint32_t>::Free(d2);
-    gkp::Queue<uint32_t>::Free(d1);
-    FinalizePeeling<<<sm_num * BLOCK_PER_SM, 32 * WARP_PER_BLOCK>>>(
-        reduced_graph_gpu.num_vertices_, graph_gpu.degree_, survival);
-    cub::DeviceScan::ExclusiveSum(
-        nullptr, temp_storage_size, graph_gpu.degree_, offset_offset, graph_gpu.num_vertices_);
+    gkp::pt<<<sm_num * BLOCK_PER_SM, 32 * 4, 0, streams[0]>>>(
+        graph_gpu, graph_gpu.degree_, new_degree, survival, counter);
+    gkp::pw<<<sm_num, 32 * 4, 0, streams[1]>>>(
+        graph_gpu, graph_gpu.degree_, new_degree, survival, counter + 1);
+    gkp::pb<<<1, 1024, 0, streams[2]>>>(
+        graph_gpu, graph_gpu.degree_, new_degree, survival, counter + 2);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    for (int i = 0; i < 3; ++i) {
+        cudaStreamDestroy(streams[i]);
+    }
+    cudaMemcpy(counter_h, counter, 8 * sizeof(*counter_h), cudaMemcpyDeviceToHost);
+    LOG("counter_h[0] = ", counter_h[0]);
+    CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
+        nullptr, temp_storage_size, new_degree, offset_offset, graph_gpu.num_vertices_));
     cudaMalloc(&temp_storage, temp_storage_size);
-    cub::DeviceScan::ExclusiveSum(
-        temp_storage, temp_storage_size, graph_gpu.degree_, offset_offset, graph_gpu.num_vertices_);
-    cub::DeviceScan::ExclusiveSum(
-        temp_storage, temp_storage_size, survival, new_vid, graph_gpu.num_vertices_);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
+        temp_storage, temp_storage_size, new_degree, offset_offset, graph_gpu.num_vertices_));
+    CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
+        temp_storage, temp_storage_size, survival, new_vid, graph_gpu.num_vertices_));
+    CUDA_CHECK(cudaGetLastError());
     cudaFree(temp_storage);
     uint32_t a, b;
     cudaMemcpy(&a, new_vid + graph_gpu.num_vertices_ - 1, sizeof(uint32_t), cudaMemcpyDeviceToHost);
@@ -1144,8 +1116,7 @@ acc_t BkSolverWrapper(Graph& graph, size_t device_id)
     cudaMemcpy(
         &a, offset_offset + graph_gpu.num_vertices_ - 1, sizeof(uint32_t), cudaMemcpyDeviceToHost);
     cudaMemcpy(
-        &b, graph_gpu.degree_ + graph_gpu.num_vertices_ - 1, sizeof(uint32_t),
-        cudaMemcpyDeviceToHost);
+        &b, new_degree + graph_gpu.num_vertices_ - 1, sizeof(uint32_t), cudaMemcpyDeviceToHost);
     LOG("New degrees generated. a = ", a, " b = ", b);
     reduced_graph_gpu.num_edges_ = (static_cast<size_t>(a) + b) >> 1;
     cudaMalloc(
@@ -1153,13 +1124,15 @@ acc_t BkSolverWrapper(Graph& graph, size_t device_id)
     cudaMalloc(&reduced_graph_gpu.colidx_, (reduced_graph_gpu.num_edges_ << 1) * sizeof(vid_t));
 
     Rebuild<<<sm_num * BLOCK_PER_SM, 32 * WARP_PER_BLOCK>>>(
-        graph_gpu, reduced_graph_gpu, graph_gpu.degree_, survival, new_vid, offset_offset);
+        graph_gpu, reduced_graph_gpu, new_degree, survival, new_vid, offset_offset);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    cudaFree(counter);
+    cudaFree(new_degree);
     cudaFree(offset_offset);
     cudaFree(new_vid);
     cudaFree(survival);
     // graph_gpu.Free();
     // graph_gpu = reduced_graph_gpu;
-    cudaDeviceSynchronize();
     auto t2 = std::chrono::high_resolution_clock::now();
     double ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
     printf("[GKP] time: %0.3lf ms\n", ms);
@@ -1168,9 +1141,10 @@ acc_t BkSolverWrapper(Graph& graph, size_t device_id)
     // BkpbKernel<<<1, 32>>>(graph_gpu, context_gpu);
 
     CUDA_CHECK(cudaDeviceSynchronize());
-    auto mc_num = context_gpu.GetMcNum() + counter_h[4] / 2 + counter_h[5] / 2 + counter_h[6];
+    auto mc_num = context_gpu.GetMcNum() + counter_h[0] + counter_h[1] + counter_h[2];
     // free memory
     graph_gpu.Free();
+    reduced_graph_gpu.Free();
     // context_gpu.bitmaps_.Free();
     // context_gpu.rpxv_.Free();
     context_gpu.buffers_.Free();

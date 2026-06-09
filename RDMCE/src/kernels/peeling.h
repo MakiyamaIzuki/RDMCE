@@ -32,35 +32,60 @@ __global__ void pt(
     GraphGpu const g,
     auto const* __restrict__ degree_in,
     auto* __restrict__ degree_out,
-    auto* __restrict__ survival)
+    auto* __restrict__ survival,
+    auto* __restrict__ counter)
 {
     val tid = blockDim.x * blockIdx.x + threadIdx.x;
     val stride = blockDim.x * gridDim.x;
+    int32_t cnt = 0;
     for (var i = tid; i < g.num_vertices_; i += stride) {
-        if (degree_in[i] > 1 && degree_in[i] < PGThreshold::alpha) {
+#if DEBUG
+        if (degree_in[i] == 0) {
+            LOG("d(", i, ") = ", 0);
+            assert(0);
+        }
+#endif // DEBUG
+        if (degree_in[i] == 1) {
+            if (val n = g.colidx_[g.rowoffset_[i]]; i < n && degree_in[n] == 1) {
+                survival[n] = survival[i] = 0;
+                degree_out[n] = degree_out[i] = 0;
+                cnt += 1;
+            }
+            // All d-1 vertices are certain to be removed by some precedure.
+            // No need to write `degree_out[i] = 1`.
+        }
+        else if (degree_in[i] < PGThreshold::alpha) {
             int32_t diff = 0;
             for (var j = g.rowoffset_[i]; j < g.rowoffset_[i + 1]; ++j) {
-                val n = g.colidx_[j];
-                if (degree_in[n] == 1) {
+                if (val n = g.colidx_[j]; degree_in[n] == 1) {
                     diff += 1;
                     survival[n] = 0;
+                    degree_out[n] = 0;
                 }
+            }
+            cnt += diff;
+            if (degree_in[i] == diff) {
+                survival[i] = 0;
             }
             degree_out[i] = degree_in[i] - diff;
         }
     }
-//    __syncthreads();
+    // __syncthreads();
+    cnt = sumBlockwise(cnt);
+    if (threadIdx.x == 0) atomicAdd(counter, cnt);
 }
 
 __global__ void pw(
     GraphGpu const g,
     auto const* __restrict__ degree_in,
     auto* __restrict__ degree_out,
-    auto* __restrict__ survival)
+    auto* __restrict__ survival,
+    auto* __restrict__ counter)
 {
     val wid = (blockDim.x * blockIdx.x + threadIdx.x) >> 5;
     val lid = threadIdx.x & 0x1f;
     val stride = blockDim.x * gridDim.x >> 5;
+    int32_t cnt = 0;
     for (var i = wid; i < g.num_vertices_; i += stride) {
         if (degree_in[i] >= PGThreshold::alpha && degree_in[i] < PGThreshold::beta) {
             int32_t diff = 0;
@@ -71,35 +96,51 @@ __global__ void pw(
                     survival[n] = 0;
                 }
             }
+            cnt += diff;
             diff = sumWarpwise(diff);
-            if (lid == 0) degree_out[i] = degree_in[i] - diff;
+            if (lid == 0) {
+                if (degree_in[i] == diff) {
+                    survival[i] = 0;
+                }
+                degree_out[i] = degree_in[i] - diff;
+            }
         }
     }
+    cnt = sumBlockwise(cnt);
+    if (threadIdx.x == 0) atomicAdd(counter, cnt);
 }
 
 __global__ void pb(
     GraphGpu const g,
     auto const* __restrict__ degree_in,
     auto* __restrict__ degree_out,
-    auto* __restrict__ survival)
+    auto* __restrict__ survival,
+    auto* __restrict__ counter)
 {
     val tid = blockDim.x * blockIdx.x + threadIdx.x;
-    val stride = blockDim.x * gridDim.x;
-    val end = g.num_vertices_ / 2;
-    for (var i = g.num_vertices_ - 1; i >= end; --i) {
+    int32_t cnt = 0;
+    for (var i = 0; i < g.num_vertices_; ++i) {
         if (degree_in[i] >= PGThreshold::beta) {
             int32_t diff = 0;
-            for (var j = g.rowoffset_[i] + tid; j < g.rowoffset_[i + 1]; j += stride) {
+            for (var j = g.rowoffset_[i] + tid; j < g.rowoffset_[i + 1]; j += blockDim.x) {
                 val n = g.colidx_[j];
                 if (degree_in[n] == 1) {
                     diff += 1;
                     survival[n] = 0;
                 }
             }
+            cnt += diff;
             diff = sumBlockwise(diff);
-            if (threadIdx.x == 0) degree_out[i] = degree_in[i] - diff;
+            if (threadIdx.x == 0) {
+                if (degree_in[i] == diff) {
+                    survival[i] = 0;
+                }
+                degree_out[i] = degree_in[i] - diff;
+            }
         }
     }
+    cnt = sumBlockwise(cnt);
+    if (threadIdx.x == 0) atomicAdd(counter, cnt);
 }
 
 template <typename Vid>
