@@ -12,10 +12,10 @@ if(NOT CUDAToolkit_FOUND)
     message(WARNING "CUDA Toolkit not found automatically.")
     message("Please set CUDA_TOOLKIT_ROOT_DIR to your CUDA installation path, e.g.:")
     message("  cmake -DCUDA_TOOLKIT_ROOT_DIR=/path/to/your/cuda ..")
-    
+
     # Optionally set a cache variable to make it easier for users
     set(CUDA_TOOLKIT_ROOT_DIR "" CACHE PATH "Path to CUDA toolkit installation")
-    
+
     # Now try again with user-provided path if any
     find_package(CUDAToolkit REQUIRED)
 endif()
@@ -24,12 +24,16 @@ endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Profiling-oriented flags should be opt-in so the default build behavior stays fast.
+option(RDMCE_ENABLE_NSIGHT_PROFILE "Enable line info and debug symbols for Nsight profiling" OFF)
+option(RDMCE_ENABLE_CUDA_DEVICE_DEBUG "Enable full CUDA device debug instrumentation (-G)" OFF)
+
 # Include project headers
 include_directories(${PROJECT_SOURCE_DIR}/include)
 
 # Use native CUDA architecture detection (CMake 3.24+)
-# set(CMAKE_CUDA_ARCHITECTURES native)
-set(CMAKE_CUDA_ARCHITECTURES 86)
+set(CMAKE_CUDA_ARCHITECTURES native)
+# set(CMAKE_CUDA_ARCHITECTURES 86)
 
 # Collect all source files
 file(GLOB_RECURSE SOURCES "src/*.cc" "src/*.cpp" "src/*.cu" "main.cc")
@@ -44,6 +48,44 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 
 # Link CUDA libraries using modern CMake targets
 target_link_libraries(${PROJECT_NAME} PRIVATE CUDA::cudart)
+
+# Keep optimization enabled for profiling builds; Nsight source correlation mainly needs
+# line information, not device debug instrumentation.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-O3 -march=native>
+    )
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:/O2>
+    )
+endif()
+
+target_compile_options(${PROJECT_NAME} PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+)
+
+if(RDMCE_ENABLE_NSIGHT_PROFILE)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${PROJECT_NAME} PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:-g>
+        )
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+        target_compile_options(${PROJECT_NAME} PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:/Zi>
+        )
+    endif()
+
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo -g>
+    )
+endif()
+
+if(RDMCE_ENABLE_CUDA_DEVICE_DEBUG)
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-G>
+    )
+endif()
 
 if(DEFINED BLOCK_PER_SM)
     target_compile_definitions(${PROJECT_NAME} PRIVATE BLOCK_PER_SM=${BLOCK_PER_SM})
@@ -64,13 +106,3 @@ if(DEFINED EXPAND_R)
         target_compile_definitions(${PROJECT_NAME} PRIVATE EXPAND_R)
     endif()
 endif()
-
-# Set optimization flags based on compiler
-if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -g -std=c++20 -march=native -DDEBUG")
-elseif (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /O2")
-endif()
-
-# Set CUDA optimization flags
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3 -G -DDEBUG")
